@@ -13,7 +13,7 @@ GimmeYourPassword
 ===============
 """
 
-SUBTITLE_TEMPLATE = "GYP({}) is a tool designed to perform tests on Host Header Injection on password reset."
+SUBTITLE_TEMPLATE = "GimmeYourPassword (GYP) is a tool designed to perform tests on reset password features on websites and analyze the results to identify vulnerabilities and interesting behaviors."
 
 
 
