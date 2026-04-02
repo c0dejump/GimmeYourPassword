@@ -7,19 +7,19 @@
 > GimmeYourPassword (GYP) is a tool designed to perform tests on reset password features on websites and analyze the results to identify vulnerabilities and interesting behaviors.
 
 <div align="center">
-<img src="https://img.shields.io/github/v/release/c0dejump/HExHTTP" alt="release version">
+<img src="https://img.shields.io/github/v/release/c0dejump/GimmeYourPassword" alt="release version">
 <img alt="Python3.7" src="https://img.shields.io/badge/Python-3.7+-informational">
 </div>
 
 <br>
 
 <p align="center">
-  <a href="https://github.com/c0dejump/HExHTTP/blob/main/CHANGELOG.md">📰 News</a> |
-  <a href="https://github.com/c0dejump/HExHTTP/#installation">⚙️ Installation</a> |
-  <a href="https://github.com/c0dejump/HExHTTP/#usage">💻 Usage</a> |
-  <a href="https://github.com/c0dejump/HExHTTP/#exemples">🧩 Exemples</a> |
-  <a href="https://github.com/c0dejump/HExHTTP/#features">🚀 Features</a> |
-  <a href="https://github.com/c0dejump/HExHTTP/#todo">🧠 TODO</a>
+  <a href="https://github.com/c0dejump/GimmeYourPassword/blob/main/CHANGELOG.md">📰 News</a> |
+  <a href="https://github.com/c0dejump/GimmeYourPassword/#installation">⚙️ Installation</a> |
+  <a href="https://github.com/c0dejump/GimmeYourPassword/#usage">💻 Usage</a> |
+  <a href="https://github.com/c0dejump/GimmeYourPassword/#exemples">🧩 Exemples</a> |
+  <a href="https://github.com/c0dejump/GimmeYourPassword/#features">🚀 Features</a> |
+  <a href="https://github.com/c0dejump/GimmeYourPassword/#todo">🧠 TODO</a>
 </p>
 
 
@@ -78,17 +78,11 @@ options:
 
 ```
 
-### Arguments
-
-```bash
-python3 gyp.py -u "https://www[.]url[.]com" -r req_exemple.txt -i https://subdom.trycloudflare.com -e mail@gmail.co
-
-```
 
 ## Examples
 
 ### Example on a public target
-TODO
+```python3 gyp.py -u "https://accounts.tesla.com/password/forgot" -r req_exemple.txt -i https://content-deposits-oct-linked.trycloudflare.com -e bbcodejump@gmail.com```
 
 
 
@@ -103,13 +97,18 @@ I use "cloudflared" on my exemples:
 
 ## Features
 
-TODO
+- Host header injection/pollution
+- Parameters pollution
+- Absolute uri injection
 
 ## TODO
 
 
 ### Based on
-TODO
+- https://hacktricks.wiki/en/pentesting-web/reset-password.html
+- https://web.archive.org/web/20250626114943/https://anugrahsr.github.io/posts/10-Password-reset-flaws/
+- https://github.com/tuhin1729/Bug-Bounty-Methodology/blob/main/PasswordReset.md
+- https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/Account%20Takeover
 
 ## Contributing
 
