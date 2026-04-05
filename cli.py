@@ -118,7 +118,7 @@ def args() -> argparse.Namespace:
     args = parser.parse_args()
 
     # Validate that either URL or file is provided
-    if not args.url and not args.url_file:
-        parser.error("Either -u/--url or -f/--file must be provided.")
+    if not args.url:
+        parser.error("Either -u/--url")
 
     return args

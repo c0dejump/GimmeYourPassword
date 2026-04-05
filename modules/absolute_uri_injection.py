@@ -6,36 +6,10 @@ from utils.utils import (
     requests,
     re,
     get_domain_from_url,
+    CANARY,
+    human_time
 )
-import socket
-import ssl
-
-
-def _raw_request(host, port, raw_data, use_ssl=False, timeout=10):
-    """
-    Send raw bytes via socket.
-    Returns the raw response as string.
-    """
-    sock = socket.create_connection((host, port), timeout=timeout)
-    if use_ssl:
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        sock = ctx.wrap_socket(sock, server_hostname=host)
-    try:
-        sock.sendall(raw_data)
-        chunks = []
-        while True:
-            try:
-                chunk = sock.recv(4096)
-                if not chunk:
-                    break
-                chunks.append(chunk)
-            except socket.timeout:
-                break
-        return b"".join(chunks).decode("utf-8", errors="replace")
-    finally:
-        sock.close()
+from utils.requests_settings import _raw_request
 
 
 def _check_raw_response(raw_resp, interactdom, baseline, payload, interact, canary, path):
@@ -46,7 +20,7 @@ def _check_raw_response(raw_resp, interactdom, baseline, payload, interact, cana
     status_match = re.search(r"HTTP/[\d.]+ (\d{3})", raw_resp)
     if status_match:
         status_code = int(status_match.group(1))
-        if status_code != baseline['status'] and status_code != 400:
+        if status_code != baseline['status'] and status_code not in [400, 403]:
             print(f"{Colors.YELLOW}   └── [STATUS ≠ BASELINE] {status_code} ≠ {baseline['status']} | PAYLOAD: {payload}{Colors.RESET}")
 
     try:
@@ -60,7 +34,7 @@ def _check_raw_response(raw_resp, interactdom, baseline, payload, interact, cana
         pass
 
 
-def absolute_uri_injection(url, parsed_req, baseline, interact, proxy=None):
+def absolute_uri_injection(url, human, parsed_req, baseline, interact, proxy=None):
     """
     Absolute URI injection in the HTTP request line.
     Replaces the path with an absolute URI target — same raw socket
@@ -79,7 +53,6 @@ def absolute_uri_injection(url, parsed_req, baseline, interact, proxy=None):
     use_ssl = scheme == "https"
     port = 443 if use_ssl else 80
 
-    CANARY = "toto123"
     canary_ua = None
     for h in headers:
         if h.lower() == "user-agent":
@@ -128,6 +101,7 @@ def absolute_uri_injection(url, parsed_req, baseline, interact, proxy=None):
 
     for target, desc in targets:
         try:
+            human_time(human)
             # Build raw request — just swap path for absolute URI target
             request_line = f"{method} {target} HTTP/1.1\r\n"
 

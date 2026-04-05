@@ -1,4 +1,4 @@
-#!/usr/bin/env python3*
+#!/usr/bin/env python3
 
 import sys
 sys.dont_write_bytecode = True
@@ -15,13 +15,16 @@ from utils.utils import (
     urllib3,
     re,
     traceback,
-    send_baseline,
     parse_raw_request
 )
+from utils.requests_settings import send_baseline
 
 from modules.parameters_pollution import parameters_pollution
 from modules.hhip import hhip
 from modules.absolute_uri_injection import absolute_uri_injection
+from modules.token_analysis import token_analysis
+from modules.method_override import method_override
+from modules.email_hijack import email_hijack
 
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -33,10 +36,13 @@ custom_header: list[str] | None = None
 
 
 
-def process_modules(url, parsed_req, interact, baseline, email, proxy=None):
-    hhip(url, parsed_req, baseline, interact, proxy)
-    parameters_pollution(url, parsed_req, baseline, interact, email, proxy)
-    absolute_uri_injection(url, parsed_req, baseline, interact, proxy)
+def process_modules(url, parsed_req, interact, baseline, email, human, proxy=None):
+    hhip(url, human, parsed_req, baseline, interact, proxy)
+    parameters_pollution(url, human, parsed_req, baseline, interact, email, proxy)
+    absolute_uri_injection(url, human, parsed_req, baseline, interact, proxy)
+    email_hijack(url, human, parsed_req, baseline, interact, email, proxy)
+    token_analysis(url, parsed_req, baseline, interact, email, proxy)
+    method_override(url, parsed_req, baseline, interact, email, proxy)
 
 
 
@@ -77,7 +83,7 @@ def cli_main() -> None:
             print(f"{Colors.BLUE} ⟘{Colors.RESET}")
             print(f"{Colors.BLUE} ⟙{Colors.RESET}")
 
-        process_modules(url, parsed_req, interact, baseline, email, proxy_arg)
+        process_modules(url, parsed_req, interact, baseline, email, human, proxy_arg)
 
 
     except KeyboardInterrupt:

