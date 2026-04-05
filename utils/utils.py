@@ -40,6 +40,8 @@ BIG_CONTENT_DELTA_RANGE = 5000
 
 EMAIL_REGEX = r"[a-zA-Z0-9._%+-]+(?:@|%40)[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"
 
+CANARY = "toto132"
+
 ## url tranformation ##
 def get_domain_from_url(url: str) -> str:
     domain = urlparse(url).netloc
@@ -100,34 +102,6 @@ def parse_headers(header_list: list[str] | None) -> dict[str, str]:
                 headers[key.strip()] = value.strip()
     return headers
     
-
-def send_baseline(url, parsed_req, proxy=None):
-    """Send the original unmodified request to establish a baseline response."""
-    original_host = parsed_req["host"]
-    method = parsed_req["method"]
-    path = parsed_req["path"]
-    body = parsed_req["body"]
-    headers = dict(parsed_req["headers"])
-    scheme= "https" if "https" in url else "http"
-
-    uri = f"{scheme}://{original_host}{path}"
-    proxies = {"http": proxy, "https": proxy} if proxy else None
-
-    try:
-        resp = requests.request(
-            method=method, url=uri, headers=headers,
-            data=body or None, verify=False, allow_redirects=False,
-            timeout=10, proxies=proxies,
-        )
-        return {
-            "status": resp.status_code,
-            "body": resp.text[:5000],
-            "body_length": len(resp.text),
-            "headers": dict(resp.headers),
-            "error": None,
-        }
-    except requests.RequestException as e:
-        return {"status": None, "body": "", "body_length": 0, "headers": {}, "error": str(e)}
 
 
 def parse_raw_request(filepath):
