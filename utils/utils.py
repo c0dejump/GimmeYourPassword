@@ -21,6 +21,7 @@ from bs4 import BeautifulSoup
 from bs4 import XMLParsedAsHTMLWarning
 
 from utils.style import spinner
+from modules.utils.style import Colors 
 
 import requests.utils
 

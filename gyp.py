@@ -83,9 +83,10 @@ def cli_main() -> None:
             print(f"{Colors.BLUE} ⟘{Colors.RESET}")
             print(f"{Colors.BLUE} ⟙{Colors.RESET}")
 
-        process_modules(url, parsed_req, interact, baseline, email, human, proxy_arg)
-
-
+            process_modules(url, parsed_req, interact, baseline, email, human, proxy_arg)
+        else:
+            print("Please define a request file with -r option")
+            sys.exit()
     except KeyboardInterrupt:
         print("Exiting")
         sys.exit()

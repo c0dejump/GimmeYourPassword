@@ -71,7 +71,7 @@ def method_override(url, parsed_req, baseline, interact, email, proxy=None):
     path = parsed_req["path"]
     body = parsed_req["body"]
     headers = dict(parsed_req["headers"])
-    scheme = "https" if "https" in url else "http"
+    scheme = urlparse(url).scheme
 
     uri = f"{scheme}://{original_host}{path}"
     proxies = {"http": proxy, "https": proxy} if proxy else None
@@ -81,7 +81,7 @@ def method_override(url, parsed_req, baseline, interact, email, proxy=None):
     # --- Phase 1: Direct method switching ---
     print(f"{Colors.CYAN} └─ Direct method switching{Colors.RESET}")
 
-    alt_methods = ["GET", "PUT", "PATCH", "DELETE"]
+    alt_methods = ["GET", "PUT", "PATCH", "DELETE", "HEAD"]
     alt_methods = [m for m in alt_methods if m != method.upper()]
 
     for alt in alt_methods:

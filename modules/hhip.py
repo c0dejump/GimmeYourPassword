@@ -181,7 +181,7 @@ def hhip(url, human, parsed_req, baseline, interact, proxy=None):
     body = parsed_req["body"]
     headers = dict(parsed_req["headers"])
 
-    scheme = "https" if "https" in url else "http"
+    scheme = urlparse(url).scheme
     use_ssl = scheme == "https"
 
     port = 443 if use_ssl else 80

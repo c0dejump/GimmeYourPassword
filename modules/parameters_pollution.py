@@ -781,7 +781,7 @@ def data_pollution(url, human, parsed_req, baseline, interact, email, proxy=None
     path = parsed_req["path"]
     body = parsed_req["body"]
     headers = dict(parsed_req["headers"])
-    scheme = "https" if "https" in url else "http"
+    scheme = urlparse(url).scheme
 
     uri = f"{scheme}://{original_host}{path}"
     proxies = {"http": proxy, "https": proxy} if proxy else None
