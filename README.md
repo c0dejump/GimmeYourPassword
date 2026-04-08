@@ -1,7 +1,7 @@
 # GimmeYourPassword
 
 <p align="center">
-  <img src="./static/docs/_media/gyp_logo.png" alt="Logo" width="520">
+  <img src="./static/docs/_media/gyp_logo_dark.png" alt="Logo" width="520">
 </p>
 
 > GimmeYourPassword (GYP) is a tool designed to perform tests on reset password features on websites and analyze the results to identify vulnerabilities and interesting behaviors.
