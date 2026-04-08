@@ -1,7 +1,7 @@
 # GimmeYourPassword
 
 <p align="center">
-  <img src="./static/docs/_media/logo_v2_gif.gif" alt="Logo" width="520">
+  <img src="./static/docs/_media/gyp_logo.png" alt="Logo" width="520">
 </p>
 
 > GimmeYourPassword (GYP) is a tool designed to perform tests on reset password features on websites and analyze the results to identify vulnerabilities and interesting behaviors.
@@ -19,7 +19,6 @@
   <a href="https://github.com/c0dejump/GimmeYourPassword/#usage">💻 Usage</a> |
   <a href="https://github.com/c0dejump/GimmeYourPassword/#exemples">🧩 Exemples</a> |
   <a href="https://github.com/c0dejump/GimmeYourPassword/#features">🚀 Features</a> |
-  <a href="https://github.com/c0dejump/GimmeYourPassword/#todo">🧠 TODO</a>
 </p>
 
 
@@ -100,8 +99,8 @@ I use "cloudflared" on my exemples:
 - Host header injection/pollution
 - Parameters pollution
 - Absolute uri injection
-
-## TODO
+- Email Hijicking
+- Token Analyse
 
 
 ### Based on

@@ -43,13 +43,15 @@ def args() -> argparse.Namespace:
         "-u",
         "--url",
         dest="url",
-        help=f"URL to test {Colors.RED}[required]{Colors.RESET} if no -f/--file provided",
+        help=f"URL to test {Colors.RED}[required]{Colors.RESET} if no -f/--file provided",,
+        required=True
     )
     group.add_argument(
         "-r",
         "--rawrequest",
         dest="rawrequest",
-        help="Raw request file path"
+        help=f"Raw request file path {Colors.RED}[required]{Colors.RESET}",
+        required=True
         )
     group.add_argument(
         "-i",
@@ -61,7 +63,8 @@ def args() -> argparse.Namespace:
         "-e",
         "--email",
         dest="email",
-        help="controlled email"
+        help="controlled email",
+        required=False,
         )
 
     group = parser.add_argument_group(f"{Colors.BLUE}> Request Settings{Colors.RESET}")
