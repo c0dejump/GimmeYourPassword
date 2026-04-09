@@ -7,6 +7,7 @@ from utils.utils import (
     requests,
     re,
     json,
+    urlparse,
     get_domain_from_url,
     EMAIL_REGEX
 )

@@ -7,6 +7,7 @@ from utils.style import Colors
 from utils.utils import (
     requests,
     parse_headers,
+    urlparse,
     urllib3,
     re,
     traceback,

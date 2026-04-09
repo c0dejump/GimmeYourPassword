@@ -43,7 +43,7 @@ def args() -> argparse.Namespace:
         "-u",
         "--url",
         dest="url",
-        help=f"URL to test {Colors.RED}[required]{Colors.RESET} if no -f/--file provided",,
+        help=f"URL to test {Colors.RED}[required]{Colors.RESET} if no -f/--file provided",
         required=True
     )
     group.add_argument(

@@ -5,6 +5,7 @@ from utils.style import Colors
 from utils.utils import (
     requests,
     re,
+    urlparse,
     get_domain_from_url,
     CANARY,
     human_time
