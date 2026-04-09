@@ -6,6 +6,7 @@ from utils.utils import (
     requests,
     parse_headers,
     urllib3,
+    urlparse,
     re,
     traceback,
     get_domain_from_url,
