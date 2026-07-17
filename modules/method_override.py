@@ -134,6 +134,8 @@ def method_override(url, parsed_req, baseline, interact, email, proxy=None):
     carrier_methods = ["GET", "PUT", "PATCH"]
     carrier_methods = [m for m in carrier_methods if m != method.upper()]
 
+    _p2 = {}  # (risk, status_code, body_len) → [(desc, reason, curl_cmd)]
+
     for carrier in carrier_methods:
         for override_hdr in override_headers_list:
             try:
@@ -162,17 +164,30 @@ def method_override(url, parsed_req, baseline, interact, email, proxy=None):
                     risk = "HIGH" if carrier == "GET" else "MEDIUM"
                     reason = f"success indicator: '{indicator}'" if indicator else f"status={resp.status_code}, len={len(resp.text)}b ≈ baseline"
                     desc = f"{risk} — {carrier} + {override_hdr}: {method} → backend treats as {method}"
-                    findings.append((desc, reason, curl_cmd))
-                    print(f"{Colors.GREEN}   └── [+] {desc}{Colors.RESET}")
-                    print(f"{Colors.GREEN}       {reason}{Colors.RESET}")
+                    _p2.setdefault((risk, resp.status_code, len(resp.text)), []).append((desc, reason, curl_cmd))
 
             except requests.RequestException:
                 pass
+
+    _DEDUP = 3
+    for _key, _items in _p2.items():
+        if len(_items) >= _DEDUP:
+            _d, _r, _c = _items[0]
+            print(f"{Colors.GREEN}   └── [+] {_d} (×{len(_items)} combinations){Colors.RESET}")
+            print(f"{Colors.GREEN}       {_r}{Colors.RESET}")
+            findings.append((_d, _r, _c))
+        else:
+            for _d, _r, _c in _items:
+                print(f"{Colors.GREEN}   └── [+] {_d}{Colors.RESET}")
+                print(f"{Colors.GREEN}       {_r}{Colors.RESET}")
+                findings.append((_d, _r, _c))
 
     # --- Phase 3: Query parameter override ---
     print(f"{Colors.CYAN} └─ Query param override{Colors.RESET}")
 
     param_overrides = ["_method", "method", "httpMethod", "_HttpMethod"]
+
+    _p3 = {}  # (status_code, body_len) → [(desc, reason, curl_cmd)]
 
     for param in param_overrides:
         try:
@@ -193,12 +208,22 @@ def method_override(url, parsed_req, baseline, interact, email, proxy=None):
             if confirmed:
                 reason = f"success indicator: '{indicator}'" if indicator else f"status={resp.status_code}, len={len(resp.text)}b ≈ baseline"
                 desc = f"HIGH — GET + ?{param}={method} → framework treats as {method} (Rails/Laravel pattern)"
-                findings.append((desc, reason, curl_cmd))
-                print(f"{Colors.GREEN}   └── [+] {desc}{Colors.RESET}")
-                print(f"{Colors.GREEN}       {reason}{Colors.RESET}")
+                _p3.setdefault((resp.status_code, len(resp.text)), []).append((desc, reason, curl_cmd))
 
         except requests.RequestException:
             pass
+
+    for _key, _items in _p3.items():
+        if len(_items) >= _DEDUP:
+            _d, _r, _c = _items[0]
+            print(f"{Colors.GREEN}   └── [+] {_d} (×{len(_items)} params){Colors.RESET}")
+            print(f"{Colors.GREEN}       {_r}{Colors.RESET}")
+            findings.append((_d, _r, _c))
+        else:
+            for _d, _r, _c in _items:
+                print(f"{Colors.GREEN}   └── [+] {_d}{Colors.RESET}")
+                print(f"{Colors.GREEN}       {_r}{Colors.RESET}")
+                findings.append((_d, _r, _c))
 
     # --- Phase 4: CSRF bypass via method ---
     print(f"{Colors.CYAN} └─ CSRF bypass via method{Colors.RESET}")

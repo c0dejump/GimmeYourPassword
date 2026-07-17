@@ -298,6 +298,8 @@ def email_hijack(url, human, parsed_req, baseline, interact, email, proxy=None):
     )
 
     # ─── Phase 1: Email replacement payloads ─────────────────────────────
+    _p1 = {}  # (status, body_len) → [(reason, crafted_email, modified_body)]
+
     for crafted_email in email_payloads:
         try:
             human_time(human)
@@ -314,14 +316,30 @@ def email_hijack(url, human, parsed_req, baseline, interact, email, proxy=None):
             accepted, indicator = _is_accepted(resp, baseline)
             if accepted:
                 reason = f"success: '{indicator}'" if indicator else f"status={resp.status_code} len={len(resp.text)}b ≈ baseline"
-                print(f"{Colors.GREEN}   └── [+] {reason}{Colors.RESET}")
-                print(f"{Colors.GREEN}       email: {crafted_email}{Colors.RESET}")
-                print(f"{Colors.GREEN}       body: {modified_body}{Colors.RESET}")
+                _p1.setdefault((resp.status_code, len(resp.text)), []).append((reason, crafted_email, modified_body))
 
         except requests.RequestException:
             pass
 
+    _DEDUP = 3
+    for _key, _items in _p1.items():
+        if len(_items) >= _DEDUP:
+            _r, _e, _b = _items[0]
+            print(f"{Colors.GREEN}   └── [+] {_r} (×{len(_items)} payloads accepted){Colors.RESET}")
+            print(f"{Colors.GREEN}       first: {_e}{Colors.RESET}")
+            print(f"{Colors.GREEN}       body:  {_b}{Colors.RESET}")
+        else:
+            for _r, _e, _b in _items:
+                print(f"{Colors.GREEN}   └── [+] {_r}{Colors.RESET}")
+                print(f"{Colors.GREEN}       email: {_e}{Colors.RESET}")
+                print(f"{Colors.GREEN}       body:  {_b}{Colors.RESET}")
+
+    if not _p1:
+        print(f"  {Colors.YELLOW}[~] No email hijack payloads accepted{Colors.RESET}")
+
     # ─── Phase 2: Extra parameter injection ──────────────────────────────
+    _p2 = {}  # (status, body_len) → [(reason, alt_param, alt_value, modified_body)]
+
     for alt_param, alt_value in alt_param_payloads:
         if alt_param.lower() == param_name.lower():
             continue
@@ -341,9 +359,19 @@ def email_hijack(url, human, parsed_req, baseline, interact, email, proxy=None):
             accepted, indicator = _is_accepted(resp, baseline)
             if accepted:
                 reason = f"success: '{indicator}'" if indicator else f"status={resp.status_code} len={len(resp.text)}b ≈ baseline"
-                print(f"{Colors.GREEN}   └── [+] {reason}{Colors.RESET}")
-                print(f"{Colors.GREEN}       added: {alt_param}={alt_value}{Colors.RESET}")
-                print(f"{Colors.GREEN}       body: {modified_body}{Colors.RESET}")
+                _p2.setdefault((resp.status_code, len(resp.text)), []).append((reason, alt_param, alt_value, modified_body))
 
         except requests.RequestException:
             pass
+
+    for _key, _items in _p2.items():
+        if len(_items) >= _DEDUP:
+            _r, _ap, _av, _b = _items[0]
+            print(f"{Colors.GREEN}   └── [+] {_r} (×{len(_items)} alt params accepted){Colors.RESET}")
+            print(f"{Colors.GREEN}       first: {_ap}={_av}{Colors.RESET}")
+            print(f"{Colors.GREEN}       body:  {_b}{Colors.RESET}")
+        else:
+            for _r, _ap, _av, _b in _items:
+                print(f"{Colors.GREEN}   └── [+] {_r}{Colors.RESET}")
+                print(f"{Colors.GREEN}       added: {_ap}={_av}{Colors.RESET}")
+                print(f"{Colors.GREEN}       body:  {_b}{Colors.RESET}")

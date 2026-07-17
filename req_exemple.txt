@@ -1,24 +1,31 @@
-POST /users/password HTTP/2
-Host: gitlab.com
-Cookie: preferred_language=fr; _gitlab_session=cell-1-84e904ddccf430f770de9221faa321cd; _cfuvid=V.0K8THfWxToyfCt5eSUe4fnvLyWsFR6irYdA6syNTQ-1775363749420-0.0.1.1-604800000; OptanonAlertBoxClosed=2026-04-05T04:35:52.858Z; OptanonConsent=isGpcEnabled=0&datestamp=Sun+Apr+05+2026+06%3A35%3A52+GMT%2B0200+(heure+d%E2%80%99%C3%A9t%C3%A9+d%E2%80%99Europe+centrale)&version=202512.1.0&browserGpcFlag=0&isIABGlobal=false&hosts=&consentId=1d675cb9-7f2c-4565-abc9-03ff137a436c&interactionCount=2&isAnonUser=1&landingPath=NotLandingPage&groups=C0001%3A1%2CC0003%3A0%2CC0002%3A0%2CC0004%3A0%2CC0007%3A0%2CC0008%3A0&AwaitingReconsent=false&intType=2
-Content-Length: 2550
-Cache-Control: max-age=0
-Sec-Ch-Ua: "Chromium";v="146", "Not-A.Brand";v="24", "Google Chrome";v="146"
-Sec-Ch-Ua-Mobile: ?0
+POST /api/graphql HTTP/2
+Host: eu.puma.com
+Cookie: AMCV_C2D31CFE5330AFE50A490D45%40AdobeOrg=-1303530583%7CMCIDTS%7C20349%7CMCMID%7C14662837494964266411382095578099508266%7CMCAAMLH-1758729796%7C6%7CMCAAMB-1758729796%7CRKhpRz8krg2tLO6pguXWp5olkAcUniQYPHaMWWgdJ3xzPWQmdj0y%7CMCOPTOUT-1758132196s%7CNONE%7CvVersion%7C3.3.0; cto_bundle=xzsXGF9DdEdIbjZCRlRzVXlTN0lDNXdyb0gzZTVyTFRDVmtYWDM3NiUyQlpkNnRKSnJPdzR4eERaNGFJSzR2Rm8wcHluVFZtMlFWaEJ3TTA2aSUyQmRRTWFCSUFKdk04MGtscU5TcEhxM2R4SEFxQm5Za0hlJTJGcnNFdWRnQTIxJTJCZUpYWmV4Q1kxTXEwbVBHVnUlMkZTVEZQcnBVN2tFVDVBJTNEJTNE; _ga_DXJNJ275CQ=GS2.1.s1758124997$o1$g0$t1758124997$j60$l0$h402990077; _ga=GA1.1.2099454730.1758124997; FPID=FPID2.2.f45BvvBGRlYlWgJFBbiSj8sHTxSF%2F2hRSgBWCImbM2Y%3D.1758124997; forterToken=34f1b591f0f849d0ad5906d7868203e4_1763397003994_51_UDS9_25ck; _hsu=hs.1771323182501.34af240882; _fw_crm_v=ea54aadf-9fd2-4b1e-c157-e3ba86b9dff6; dwanonymous_c5a39b2ce2870afea8e0fb7344b8fb95=decc1DGCCAbBhl2BNxDymaRNzQ; OptanonConsent=isGpcEnabled=0&datestamp=Thu+Jul+16+2026+11%3A17%3A40+GMT%2B0200+(heure+d%E2%80%99%C3%A9t%C3%A9+d%E2%80%99Europe+centrale)&version=202606.2.0&browserGpcFlag=0&isIABGlobal=false&hosts=&consentId=b114ff5f-4484-463f-b46e-c05019dc8746&interactionCount=2&isAnonUser=1&prevHadToken=0&landingPath=NotLandingPage&groups=C0001%3A1%2CC0002%3A1%2CC0003%3A1%2CC0005%3A0%2CC0004%3A0%2CC0007%3A1&intType=1&geolocation=FR%3BBRE&AwaitingReconsent=false&isDntEnabled=1; _ga_Z9W7F41DQW=GS2.1.s1784193454$o1$g1$t1784193464$j50$l0$h1477673904$dkkfr7sL0tlKULx6qglyVf3ZrciWZMsb-QQ
+Content-Length: 165
+Refresh-Token: lJc0LqFy9HM2yl1VvdUSqcGvyDHoPl0xJt135qu1nQs
 Sec-Ch-Ua-Platform: "Windows"
-Origin: https://gitlab.com
+Authorization: Bearer eyJ2ZXIiOiIxLjAiLCJqa3UiOiJzbGFzL3Byb2QvYmdibl9wcmQiLCJraWQiOiI1ZWJmMGE2OC03NDBlLTQ1MjUtODI0Zi0wYmNkZWM2NjIwODAiLCJ0eXAiOiJqd3QiLCJjbHYiOiJKMi4zLjQiLCJhbGciOiJFUzI1NiJ9.eyJhdXQiOiJHVUlEIiwic2NwIjoic2ZjYy5zaG9wcGVyLW15YWNjb3VudC5iYXNrZXRzIGNfZ2lmdGNhcmRiYWxhbmNlIHNmY2Muc2hvcHBlci1teWFjY291bnQucGF5bWVudGluc3RydW1lbnRzIGNfcG9zdGFsQ29kZUluZm9fciBzZmNjLnNob3BwZXItY3VzdG9tZXJzLmxvZ2luIHNmY2Muc2hvcHBlci1teWFjY291bnQub3JkZXJzIHNmY2Muc2hvcHBlci1wcm9kdWN0bGlzdHMgc2ZjYy5zaG9wcGVyLXByb21vdGlvbnMgc2ZjYy5zaG9wcGVyLW15YWNjb3VudC5wYXltZW50aW5zdHJ1bWVudHMucncgc2ZjYy5zaG9wcGVyLW15YWNjb3VudC5wcm9kdWN0bGlzdHMgc2ZjYy5zaG9wcGVyLWNhdGVnb3JpZXMgc2ZjYy5zaG9wcGVyLW15YWNjb3VudCBzZmNjLnNob3BwZXItbXlhY2NvdW50LmFkZHJlc3NlcyBzZmNjLnNob3BwZXItcHJvZHVjdHMgc2ZjYy5zaG9wcGVyLW15YWNjb3VudC5ydyBjX2hlYWRsZXNzQ3VzdG9tQXBpIHNmY2Muc2hvcHBlci1jb250ZXh0LnJ3IHNmY2Muc2hvcHBlci1jdXN0b21lcnMucmVnaXN0ZXIgc2ZjYy5zaG9wcGVyLWJhc2tldHMtb3JkZXJzIHNmY2Muc2hvcHBlci1teWFjY291bnQuYWRkcmVzc2VzLnJ3IHNmY2Muc2hvcHBlci1teWFjY291bnQucHJvZHVjdGxpc3RzLnJ3IHNmY2Muc2hvcHBlci1iYXNrZXRzLW9yZGVycy5ydyBjX3ByaWNpbmdBbmRQcm9tb3Rpb25zX3Igc2ZjYy5zaG9wcGVyLWdpZnQtY2VydGlmaWNhdGVzIHNmY2Muc2hvcHBlci1wcm9kdWN0LXNlYXJjaCIsInN1YiI6ImNjLXNsYXM6OmJnYm5fcHJkOjpzY2lkOjEyYzdkODQ1LWE2ZTMtNDI0YS1iZjM3LWRjZjA0YWFhODE1Mjo6dXNpZDpiZDBlZWNmZS05OTBjLTRlYjItOWE5Mi04ZTZhZmUwODM2M2IiLCJzc2MiOiJzNmJ3d3NucCIsImN0eCI6InNsYXMiLCJpc3MiOiJzbGFzL3Byb2QvYmdibl9wcmQiLCJpc3QiOjEsImRudCI6IjAiLCJhdWQiOiJjb21tZXJjZWNsb3VkL3Byb2QvYmdibl9wcmQiLCJuYmYiOjE3ODQxOTM0MzAsInN0eSI6IlVzZXIiLCJpc2IiOiJ1aWRvOnNsYXM6OnVwbjpHdWVzdDo6dWlkbjpHdWVzdCBVc2VyOjpnY2lkOmFid0tvVXh1dEh4S3NSbXJJVXdXWVl4dWdXOjpjaGlkOkVVIiwiZXhwIjoxNzg0MTk1MjYwLCJpYXQiOjE3ODQxOTM0NjAsImp0aSI6IkMyQzE0NzQ1Mjk3MDQwLTkwMTc2OTM4NTI2NTAyNjUzMjg0NDc1MDk1In0.OQbGWoBddH29uU5bZVcWYdBWZHRjINQ-3PmTYYTZwypBsUo6cSVyG68YZKCfIfu2idmnKwJUPbxUmYIdBOgvAw
+X-Operation-Name: ResetPassword
+Sec-Ch-Ua: "Not;A=Brand";v="8", "Chromium";v="150", "Google Chrome";v="150"
+Sec-Ch-Ua-Mobile: ?0
+X-Graphql-Client-Version: 18a376b2995abb4376f9bbfd63d6b17fa7c0f14d
+X-Graphql-Client-Name: nitro-fe
+Puma-Request-Source: web
+Traceparent: 00-d35387cc6612d756719fedb5b01eee61-38f9c21548885878-00
+Accept: application/graphql-response+json, application/graphql+json, application/json
+Content-Type: application/json
+Locale: fr-FR
+Customer-Group: cdfccbc3bf1cfc6878d6adfb06f0f4adcdc7028d63897bf6e70cd25e49f46288
+Customer-Id: abwKoUxutHxKsRmrIUwWYYxugW
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36
 Dnt: 1
-Upgrade-Insecure-Requests: 1
-Content-Type: application/x-www-form-urlencoded
-User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36
-Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7
+Origin: https://eu.puma.com
 Sec-Fetch-Site: same-origin
-Sec-Fetch-Mode: navigate
-Sec-Fetch-User: ?1
-Sec-Fetch-Dest: document
-Referer: https://gitlab.com/users/password/new
+Sec-Fetch-Mode: cors
+Sec-Fetch-Dest: empty
+Referer: https://eu.puma.com/fr/fr
 Accept-Encoding: gzip, deflate, br
 Accept-Language: fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7
-Priority: u=0, i
+Priority: u=1, i
 
-authenticity_token=REDACTED&user%5Bemail%5D=victim%40example.com&g-recaptcha-response=REDACTED
+{"operationName":"ResetPassword","query":"mutation ResetPassword($email: String!) {\n  resetPassword(email: $email)\n}","variables":{"email":"attacker@your-domain"}}

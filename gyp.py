@@ -23,8 +23,16 @@ from modules.parameters_pollution import parameters_pollution
 from modules.hhip import hhip
 from modules.absolute_uri_injection import absolute_uri_injection
 from modules.token_analysis import token_analysis
+from modules.token_reuse import token_reuse
 from modules.method_override import method_override
 from modules.email_hijack import email_hijack
+from modules.idor import idor
+from modules.race_condition import race_condition
+from modules.csrf import csrf
+from modules.rate_limit_bypass import rate_limit_bypass
+from modules.referrer_manipulation import referrer_manipulation
+from modules.graphql import graphql
+from modules.callback_url import callback_url
 
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -41,8 +49,16 @@ def process_modules(url, parsed_req, interact, baseline, email, human, proxy=Non
     parameters_pollution(url, human, parsed_req, baseline, interact, email, proxy)
     absolute_uri_injection(url, human, parsed_req, baseline, interact, proxy)
     email_hijack(url, human, parsed_req, baseline, interact, email, proxy)
+    graphql(url, parsed_req, baseline, interact, email, proxy)
     token_analysis(url, parsed_req, baseline, interact, email, proxy)
+    token_reuse(url, parsed_req, baseline, interact, email, proxy)
     method_override(url, parsed_req, baseline, interact, email, proxy)
+    csrf(url, parsed_req, baseline, interact, email, proxy)
+    idor(url, parsed_req, baseline, interact, email, proxy)
+    race_condition(url, parsed_req, baseline, interact, email, proxy)
+    rate_limit_bypass(url, parsed_req, baseline, interact, email, proxy)
+    callback_url(url, parsed_req, baseline, interact, email, proxy)
+    referrer_manipulation(url, human, parsed_req, baseline, interact, proxy)
 
 
 
@@ -71,6 +87,17 @@ def cli_main() -> None:
 
             print(f"\n{Colors.CYAN}[*] Parsing: {rawrequest}{Colors.RESET}")
             parsed_req = parse_raw_request(rawrequest)
+
+            # Apply CLI overrides after parsing
+            if custom_header:
+                extra = parse_headers(custom_header)
+                parsed_req["headers"].update(extra)
+            if user_agent:
+                for k in list(parsed_req["headers"].keys()):
+                    if k.lower() == "user-agent":
+                        del parsed_req["headers"][k]
+                        break
+                parsed_req["headers"]["User-Agent"] = user_agent
 
             print(f"{Colors.GREEN}[+] {parsed_req['method']} {parsed_req['path']}{Colors.RESET}")
             print(f"{Colors.GREEN}[+] Host: {parsed_req['host']}{Colors.RESET}")

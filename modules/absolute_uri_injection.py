@@ -15,24 +15,25 @@ from utils.requests_settings import _raw_request
 
 def _check_raw_response(raw_resp, interactdom, baseline, payload, interact, canary, path):
     """Check a raw socket response string for indicators."""
-    if interactdom in raw_resp:
+    if interactdom and interactdom in raw_resp:
         print(f"{Colors.GREEN}   └── [+] {interactdom} reflected in raw response | PAYLOAD: {payload}{Colors.RESET}")
 
     status_match = re.search(r"HTTP/[\d.]+ (\d{3})", raw_resp)
     if status_match:
         status_code = int(status_match.group(1))
         if status_code != baseline['status'] and status_code not in [400, 403]:
-            print(f"{Colors.YELLOW}   └── [STATUS ≠ BASELINE] {status_code} ≠ {baseline['status']} | PAYLOAD: {payload}{Colors.RESET}")
+            print(f"{Colors.YELLOW}   └── [{baseline['status']} > {status_code}] | PAYLOAD: {payload}{Colors.RESET}")
 
-    try:
-        req_interact = requests.get(interact, verify=False, allow_redirects=False, timeout=10)
-        if req_interact.status_code == 200:
-            if canary in req_interact.text:
-                print(f"{Colors.GREEN}   └── [+] canary '{canary}' caught on {interact} | PAYLOAD: {payload}{Colors.RESET}")
-            if path in req_interact.text:
-                print(f"{Colors.GREEN}   └── [+] path '{path}' caught on {interact} | PAYLOAD: {payload}{Colors.RESET}")
-    except requests.RequestException:
-        pass
+    if interact:
+        try:
+            req_interact = requests.get(interact, verify=False, allow_redirects=False, timeout=10)
+            if req_interact.status_code == 200:
+                if canary in req_interact.text:
+                    print(f"{Colors.GREEN}   └── [+] canary '{canary}' caught on {interact} | PAYLOAD: {payload}{Colors.RESET}")
+                if path in req_interact.text:
+                    print(f"{Colors.GREEN}   └── [+] path '{path}' caught on {interact} | PAYLOAD: {payload}{Colors.RESET}")
+        except requests.RequestException:
+            pass
 
 
 def absolute_uri_injection(url, human, parsed_req, baseline, interact, proxy=None):
@@ -42,6 +43,9 @@ def absolute_uri_injection(url, human, parsed_req, baseline, interact, proxy=Non
     pattern as double-host and unicode modules.
     """
     print(f"{Colors.CYAN} ├  Absolute URI analysis{Colors.RESET}")
+    if not interact:
+        print(f"  {Colors.YELLOW}[!] -i/--interact required for out-of-band detection{Colors.RESET}")
+        return
 
     interactdom = get_domain_from_url(interact)
     original_host = parsed_req["host"]

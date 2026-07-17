@@ -16,6 +16,7 @@ from urllib.parse import (
     urlparse,
 )
 import requests
+import secrets
 import urllib3
 from bs4 import BeautifulSoup
 from bs4 import XMLParsedAsHTMLWarning
@@ -41,12 +42,14 @@ BIG_CONTENT_DELTA_RANGE = 5000
 
 EMAIL_REGEX = r"[a-zA-Z0-9._%+-]+(?:@|%40)[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"
 
-CANARY = "toto132"
+CANARY = secrets.token_hex(8)
 
 ## url tranformation ##
 def get_domain_from_url(url: str) -> str:
+    if not url:
+        return ""
     domain = urlparse(url).netloc
-    return domain
+    return domain if isinstance(domain, str) else domain.decode("utf-8", errors="replace")
 
 
 def get_ip_from_url(url: str) -> str:
@@ -59,12 +62,14 @@ def get_ip_from_url(url: str) -> str:
 ## Timing requests ##
 
 def human_time(human: str) -> None:
+    if not human:
+        return
     if human.isdigit():
-        time.sleep(int(human))
-    elif human.lower() == "r" or human.lower() == "random":
+        t = int(human)
+        if t > 0:
+            time.sleep(t)
+    elif human.lower() in ("r", "random"):
         time.sleep(random.randrange(6))  # nosec B311
-    else:
-        pass
 
 
 
@@ -106,14 +111,15 @@ def parse_headers(header_list: list[str] | None) -> dict[str, str]:
 
 
 def parse_raw_request(filepath):
-    with open(filepath, "r") as f:
+    with open(filepath, "r", newline="") as f:
         raw = f.read()
 
-    parts = raw.split("\n\n", 1)
+    # Handle both CRLF (Burp exports) and LF line endings
+    parts = re.split(r'\r?\n\r?\n', raw, 1)
     header_section = parts[0]
     body = parts[1].strip() if len(parts) > 1 else ""
 
-    lines = header_section.strip().split("\n")
+    lines = [l.rstrip("\r") for l in header_section.strip().splitlines()]
     request_line = lines[0].strip()
     match = re.match(
         r"^(GET|POST|PUT|PATCH|DELETE|OPTIONS)\s+(\S+)\s+HTTP/[\d.]+$",

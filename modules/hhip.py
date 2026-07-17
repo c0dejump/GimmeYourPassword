@@ -175,7 +175,9 @@ def hhip(url, human, parsed_req, baseline, interact, proxy=None):
     Host Header Injection Poisoning
     """
     print(f"{Colors.CYAN} ├ HHIP analysis{Colors.RESET}")
-    interactdom = get_domain_from_url(interact)
+    if not interact:
+        print(f"  {Colors.YELLOW}[!] No -i/--interact provided — OOB disabled, reflection-only mode{Colors.RESET}")
+    interactdom = get_domain_from_url(interact) if interact else "evil.com"
     original_host = parsed_req["host"]
     method = parsed_req["method"]
     path = parsed_req["path"]
@@ -258,43 +260,45 @@ def hhip(url, human, parsed_req, baseline, interact, proxy=None):
 
 def _check_response(resp, interactdom, baseline, payload, interact, canary, path):
     """Check a requests.Response for HHI indicators."""
-    if interactdom in resp.text:
+    if interactdom and interactdom in resp.text:
         print(f"{Colors.GREEN}   └── [+] {interactdom} reflected in body | PAYLOAD: {payload}{Colors.RESET}")
     resp_headers_str = str(resp.headers)
-    if interactdom in resp_headers_str:
+    if interactdom and interactdom in resp_headers_str:
         print(f"{Colors.GREEN}   └── [+] {interactdom} reflected in headers | PAYLOAD: {payload}{Colors.RESET}")
     if resp.status_code != baseline['status'] and resp.status_code not in [400, 403]:
-        print(f"{Colors.YELLOW}   └──  [STATUS {resp.status_code} ≠ BASELINE {baseline['status']}] {Colors.RESET}| PAYLOAD: {payload}")
+        print(f"{Colors.YELLOW}   └──  [{baseline['status']} > {resp.status_code}] {Colors.RESET}| PAYLOAD: {payload}")
     if resp.status_code == baseline['status'] and len(resp.content) != baseline['body_length']:
-        print(f"{Colors.YELLOW}   └──  [LENGTH {len(resp.content)}b ≠ BASELINE {baseline['body_length']}b] {Colors.RESET}| PAYLOAD: {payload}")
-    try:
-        req_interact = requests.get(interact, verify=False, allow_redirects=False, timeout=10)
-        if req_interact.status_code == 200:
-            if canary in req_interact.text:
-                print(f"{Colors.GREEN}   └── [+] canary '{canary}' caught on {interact} {Colors.RESET}| PAYLOAD: {payload}")
-            if path in req_interact.text:
-                print(f"{Colors.GREEN}   └── [+] path '{path}' caught on {interact} {Colors.RESET}| PAYLOAD:  {payload}")
-    except requests.RequestException:
-        pass
+        print(f"{Colors.YELLOW}   └──  [{baseline['body_length']}b > {len(resp.content)}b] {Colors.RESET}| PAYLOAD: {payload}")
+    if interact:
+        try:
+            req_interact = requests.get(interact, verify=False, allow_redirects=False, timeout=10)
+            if req_interact.status_code == 200:
+                if canary in req_interact.text:
+                    print(f"{Colors.GREEN}   └── [+] canary '{canary}' caught on {interact} {Colors.RESET}| PAYLOAD: {payload}")
+                if path in req_interact.text:
+                    print(f"{Colors.GREEN}   └── [+] path '{path}' caught on {interact} {Colors.RESET}| PAYLOAD:  {payload}")
+        except requests.RequestException:
+            pass
 
 
 def _check_raw_response(raw_resp, interactdom, baseline, payload, interact, canary, path):
     """Check a raw socket response string for HHI indicators."""
-    if interactdom in raw_resp:
+    if interactdom and interactdom in raw_resp:
         print(f"{Colors.GREEN}   └── [+] {interactdom} reflected in raw response {Colors.RESET}| PAYLOAD: {payload}")
 
     status_match = re.search(r"HTTP/[\d.]+ (\d{3})", raw_resp)
     if status_match:
         status_code = int(status_match.group(1))
         if status_code != baseline['status'] and status_code not in [400, 403]:
-            print(f"{Colors.YELLOW}   └── [STATUS {status_code} ≠ BASELINE {baseline['status']}] {Colors.RESET}| PAYLOAD: {payload}")
+            print(f"{Colors.YELLOW}   └── [{baseline['status']} > {status_code}] {Colors.RESET}| PAYLOAD: {payload}")
 
-    try:
-        req_interact = requests.get(interact, verify=False, allow_redirects=False, timeout=10)
-        if req_interact.status_code == 200:
-            if canary in req_interact.text:
-                print(f"{Colors.GREEN}   └── [+] canary '{canary}' caught on {interact} {Colors.RESET}| PAYLOAD: {payload}")
-            if path in req_interact.text:
-                print(f"{Colors.GREEN}   └── [+] path '{path}' caught on {interact} {Colors.RESET}| PAYLOAD: {payload}")
-    except requests.RequestException:
-        pass
+    if interact:
+        try:
+            req_interact = requests.get(interact, verify=False, allow_redirects=False, timeout=10)
+            if req_interact.status_code == 200:
+                if canary in req_interact.text:
+                    print(f"{Colors.GREEN}   └── [+] canary '{canary}' caught on {interact} {Colors.RESET}| PAYLOAD: {payload}")
+                if path in req_interact.text:
+                    print(f"{Colors.GREEN}   └── [+] path '{path}' caught on {interact} {Colors.RESET}| PAYLOAD: {payload}")
+        except requests.RequestException:
+            pass
