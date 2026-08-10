@@ -4,15 +4,11 @@ sys.dont_write_bytecode = True
 from utils.style import Colors
 from utils.utils import (
     requests,
-    parse_headers,
-    urllib3,
     urlparse,
-    re,
-    traceback,
     get_domain_from_url,
-    json,
     CANARY,
-    human_time
+    human_time,
+    check_raw_response,
 )
 from utils.requests_settings import _raw_request
 
@@ -221,6 +217,9 @@ def hhip(url, human, parsed_req, baseline, interact, proxy=None):
         {"X-Remote-Addr": interactdom},
         {"X-Host": interactdom},
         {"X-Original-URL": interact},
+        {"X-Rewrite-URL": interact},
+        {"X-Forwarded-Server": interactdom},
+        {"X-Original-Host": interactdom},
         {"Forwarded": f"host={interactdom}"},
     ]
 
@@ -245,7 +244,7 @@ def hhip(url, human, parsed_req, baseline, interact, proxy=None):
         headers, interactdom, canary_ua
     )
     for payload_desc, raw_resp in dh_results:
-        _check_raw_response(raw_resp, interactdom, baseline, payload_desc, interact, CANARY, path)
+        check_raw_response(raw_resp, interactdom, baseline, payload_desc, interact, CANARY, path)
 
     # --- Phase 3: Unicode Host injection (raw socket) ---
     print(f"{Colors.BLUE} └─ Unicode Host injection{Colors.RESET}")
@@ -255,7 +254,7 @@ def hhip(url, human, parsed_req, baseline, interact, proxy=None):
         headers, interactdom, canary_ua, unicode_payloads
     )
     for payload_info, raw_resp in unicode_results:
-        _check_raw_response(raw_resp, interactdom, baseline, payload_info, interact, CANARY, path)
+        check_raw_response(raw_resp, interactdom, baseline, payload_info, interact, CANARY, path)
 
 
 def _check_response(resp, interactdom, baseline, payload, interact, canary, path):
@@ -277,28 +276,5 @@ def _check_response(resp, interactdom, baseline, payload, interact, canary, path
                     print(f"{Colors.GREEN}   └── [+] canary '{canary}' caught on {interact} {Colors.RESET}| PAYLOAD: {payload}")
                 if path in req_interact.text:
                     print(f"{Colors.GREEN}   └── [+] path '{path}' caught on {interact} {Colors.RESET}| PAYLOAD:  {payload}")
-        except requests.RequestException:
-            pass
-
-
-def _check_raw_response(raw_resp, interactdom, baseline, payload, interact, canary, path):
-    """Check a raw socket response string for HHI indicators."""
-    if interactdom and interactdom in raw_resp:
-        print(f"{Colors.GREEN}   └── [+] {interactdom} reflected in raw response {Colors.RESET}| PAYLOAD: {payload}")
-
-    status_match = re.search(r"HTTP/[\d.]+ (\d{3})", raw_resp)
-    if status_match:
-        status_code = int(status_match.group(1))
-        if status_code != baseline['status'] and status_code not in [400, 403]:
-            print(f"{Colors.YELLOW}   └── [{baseline['status']} > {status_code}] {Colors.RESET}| PAYLOAD: {payload}")
-
-    if interact:
-        try:
-            req_interact = requests.get(interact, verify=False, allow_redirects=False, timeout=10)
-            if req_interact.status_code == 200:
-                if canary in req_interact.text:
-                    print(f"{Colors.GREEN}   └── [+] canary '{canary}' caught on {interact} {Colors.RESET}| PAYLOAD: {payload}")
-                if path in req_interact.text:
-                    print(f"{Colors.GREEN}   └── [+] path '{path}' caught on {interact} {Colors.RESET}| PAYLOAD: {payload}")
         except requests.RequestException:
             pass

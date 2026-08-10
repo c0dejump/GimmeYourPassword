@@ -4,36 +4,13 @@ sys.dont_write_bytecode = True
 from utils.style import Colors
 from utils.utils import (
     requests,
-    re,
     urlparse,
     get_domain_from_url,
     CANARY,
-    human_time
+    human_time,
+    check_raw_response,
 )
 from utils.requests_settings import _raw_request
-
-
-def _check_raw_response(raw_resp, interactdom, baseline, payload, interact, canary, path):
-    """Check a raw socket response string for indicators."""
-    if interactdom and interactdom in raw_resp:
-        print(f"{Colors.GREEN}   └── [+] {interactdom} reflected in raw response | PAYLOAD: {payload}{Colors.RESET}")
-
-    status_match = re.search(r"HTTP/[\d.]+ (\d{3})", raw_resp)
-    if status_match:
-        status_code = int(status_match.group(1))
-        if status_code != baseline['status'] and status_code not in [400, 403]:
-            print(f"{Colors.YELLOW}   └── [{baseline['status']} > {status_code}] | PAYLOAD: {payload}{Colors.RESET}")
-
-    if interact:
-        try:
-            req_interact = requests.get(interact, verify=False, allow_redirects=False, timeout=10)
-            if req_interact.status_code == 200:
-                if canary in req_interact.text:
-                    print(f"{Colors.GREEN}   └── [+] canary '{canary}' caught on {interact} | PAYLOAD: {payload}{Colors.RESET}")
-                if path in req_interact.text:
-                    print(f"{Colors.GREEN}   └── [+] path '{path}' caught on {interact} | PAYLOAD: {payload}{Colors.RESET}")
-        except requests.RequestException:
-            pass
 
 
 def absolute_uri_injection(url, human, parsed_req, baseline, interact, proxy=None):
@@ -125,7 +102,7 @@ def absolute_uri_injection(url, human, parsed_req, baseline, interact, proxy=Non
 
             raw_req = (request_line + raw_headers + "\r\n").encode() + body_bytes
             raw_resp = _raw_request(original_host, port, raw_req, use_ssl=use_ssl, timeout=10)
-            _check_raw_response(raw_resp, interactdom, baseline, f"{target}", interact, CANARY, path)
+            check_raw_response(raw_resp, interactdom, baseline, f"{target}", interact, CANARY, path)
 
         except Exception as e:
             print(f"  {Colors.RED}[!] absolute-URI error ({desc} → {method} {target}): {e}{Colors.RESET}")

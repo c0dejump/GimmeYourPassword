@@ -6,7 +6,7 @@ import json as _json
 import re
 import urllib.parse
 from utils.style import Colors
-from utils.utils import requests
+from utils.utils import requests, detect_content_type
 
 
 IDOR_PARAM_NAMES = [
@@ -19,14 +19,6 @@ UUID_RE = re.compile(
     r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
     re.IGNORECASE
 )
-
-
-def _detect_content_type(headers):
-    for k, v in headers.items():
-        if k.lower() == "content-type":
-            if "application/json" in v.lower():
-                return "json"
-    return "form"
 
 
 def _extract_idor_params(body, content_type):
@@ -101,7 +93,7 @@ def idor(url, parsed_req, baseline, interact, email, proxy=None):
         print(f"  {Colors.YELLOW}[!] No body — IDOR test skipped{Colors.RESET}")
         return
 
-    content_type = _detect_content_type(headers)
+    content_type = detect_content_type(headers)
     idor_params = _extract_idor_params(body, content_type)
 
     if not idor_params:

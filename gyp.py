@@ -25,7 +25,6 @@ from modules.absolute_uri_injection import absolute_uri_injection
 from modules.token_analysis import token_analysis
 from modules.token_reuse import token_reuse
 from modules.method_override import method_override
-from modules.email_hijack import email_hijack
 from modules.idor import idor
 from modules.race_condition import race_condition
 from modules.csrf import csrf
@@ -48,7 +47,6 @@ def process_modules(url, parsed_req, interact, baseline, email, human, proxy=Non
     hhip(url, human, parsed_req, baseline, interact, proxy)
     parameters_pollution(url, human, parsed_req, baseline, interact, email, proxy)
     absolute_uri_injection(url, human, parsed_req, baseline, interact, proxy)
-    email_hijack(url, human, parsed_req, baseline, interact, email, proxy)
     graphql(url, parsed_req, baseline, interact, email, proxy)
     token_analysis(url, parsed_req, baseline, interact, email, proxy)
     token_reuse(url, parsed_req, baseline, interact, email, proxy)

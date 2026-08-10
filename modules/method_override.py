@@ -9,13 +9,10 @@ from utils.utils import (
     json,
     urlparse,
     get_domain_from_url,
-    EMAIL_REGEX
+    EMAIL_REGEX,
+    SUCCESS_INDICATORS,
 )
 import shlex
-
-
-SUCCESS_INDICATORS = ["success", "email sent", "password reset", "reset link",
-                      "check your email", "lien envoy", "mot de passe", "réinitialis"]
 
 
 def _build_curl(method, url, headers, body=None):
