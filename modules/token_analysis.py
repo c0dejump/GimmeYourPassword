@@ -11,10 +11,13 @@ from utils.utils import (
     get_domain_from_url,
     EMAIL_REGEX
 )
+from utils import live
 import math
 import base64
 import hashlib
+import hmac
 import time
+import urllib.parse
 from collections import Counter
 from datetime import datetime, timezone
 
@@ -28,7 +31,17 @@ TOKEN_JSON_KEYS = [
     "verification_code", "verificationCode", "pin", "secret",
     "temp_token", "tempToken", "one_time_token", "temptoken",
     "nonce", "resetCode", "reset_code",
+    # Auth-flow / journey state tokens (ForgeRock/OpenAM authId, continue tokens…)
+    "authId", "authid", "continueToken", "flowToken",
+    "stateToken", "state_token", "flowId", "sessionToken",
 ]
+
+# Reset codes / OTP / PIN are legitimately short (4–6 digits). For these keys we
+# accept shorter values so we don't silently drop the most interesting leak.
+SHORT_OK_KEYS = {
+    "otp", "code", "pin", "verification_code", "verificationCode",
+    "resetCode", "reset_code",
+}
 
 # Token in URL params (Location header or body links)
 URL_TOKEN_RE = re.compile(
@@ -66,13 +79,15 @@ def _extract_tokens_from_response(resp):
         if isinstance(data, dict):
             # Flat lookup
             for key in TOKEN_JSON_KEYS:
-                if key in data and isinstance(data[key], str) and len(data[key]) >= 6:
+                _min = 4 if key in SHORT_OK_KEYS else 6
+                if key in data and isinstance(data[key], str) and len(data[key]) >= _min:
                     found.append((data[key], f"json → {key}"))
             # Nested 1 level
             for k, v in data.items():
                 if isinstance(v, dict):
                     for key in TOKEN_JSON_KEYS:
-                        if key in v and isinstance(v[key], str) and len(v[key]) >= 6:
+                        _min = 4 if key in SHORT_OK_KEYS else 6
+                        if key in v and isinstance(v[key], str) and len(v[key]) >= _min:
                             found.append((v[key], f"json → {k}.{key}"))
     except Exception:
         pass
@@ -113,7 +128,16 @@ def _extract_tokens_from_response(resp):
     for token, source in found:
         if token in seen:
             continue
-        if len(token) < 8 or len(token) > 512:
+        # keep short OTP/PIN codes (was <8, which silently dropped 4–7 char codes)
+        # JWTs are legitimately long (a ForgeRock authId with an embedded sessionId
+        # is ~530 chars) — the 512 cap was silently dropping real leaked tokens, so
+        # allow structured JWTs up to a much higher bound.
+        _looks_jwt = token.count(".") == 2 and token.startswith("eyJ")
+        if len(token) < 4:
+            continue
+        if len(token) > 512 and not _looks_jwt:
+            continue
+        if len(token) > 8192:
             continue
         if _is_encrypted_cookie(token):
             continue
@@ -253,31 +277,172 @@ def _get_response_timestamp(resp):
     return time.time()
 
 
+# ─── JWT deep analysis (weak secret, alg confusion, claim/header abuse) ───────
+
+# High-signal HMAC secrets (jwt_tool / well-known lists) — checked inline because
+# it's instant. For a real dictionary run we print a ready hashcat -m 16500 command.
+HMAC_SECRET_WORDLIST = [
+    "", "secret", "password", "123456", "changeit", "changeme", "change_me",
+    "key", "jwt", "jwtsecret", "jwt_secret", "JWT_SECRET", "token", "admin",
+    "secretkey", "secret_key", "secretKey", "your-256-bit-secret",
+    "your_jwt_secret", "supersecret", "super_secret", "private", "privatekey",
+    "test", "dev", "default", "root", "qwerty", "s3cr3t", "s3cr37",
+    "signing-key", "signingkey", "shared-secret", "sharedsecret",
+    "my-secret", "mysecret", "secretsecret", "password123", "letmein",
+    "iloveyou", "nullnull", "ssshhh", "hmac", "this-is-a-secret",
+    "changethis", "secret123", "12345", "1234567890", "0000",
+    "a-string-secret-at-least-256-bits-long", "trustkey", "hunter2",
+    "P@ssw0rd", "welcome", "master", "access", "auth", "authsecret",
+]
+
+# Claim keys whose presence in a JWT *payload* means a secret is shipped to the
+# client (it should live server-side, referenced by an opaque id instead).
+SENSITIVE_CLAIM_KEYS = [
+    "otk", "otp", "secret", "password", "passwd", "pwd", "sessionid",
+    "session_id", "api_key", "apikey", "private_key", "privatekey",
+    "ssn", "credit", "card", "cvv", "pin", "reset_token", "resettoken",
+    "refresh_token", "access_token", "client_secret",
+]
+
+# JWT header params that pull a key/material from an attacker-influenced source.
+DANGEROUS_HEADER_PARAMS = {
+    "jku": "fetches signing key from a URL → SSRF + forge if URL is attacker-controlled",
+    "x5u": "fetches X.509 cert from a URL → SSRF + forge if URL is attacker-controlled",
+    "jwk":  "embeds the public key in the token → self-signed forgery if trusted",
+    "kid": "key id used in a lookup → path traversal / SQLi / command injection surface",
+    "x5c": "embeds a cert chain → self-signed forgery if not pinned",
+}
+
+
+def _b64url(b):
+    return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
+
+
+def crack_hs_secret(token, extra_words=None):
+    """Try to recover the HMAC secret of an HS* JWT. Returns the secret or None."""
+    parts = token.split(".")
+    if len(parts) != 3:
+        return None
+    signing_input = f"{parts[0]}.{parts[1]}".encode()
+    target = parts[2]
+    alg_map = {"HS256": hashlib.sha256, "HS384": hashlib.sha384, "HS512": hashlib.sha512}
+    hdr = _is_jwt(token)
+    algo = alg_map.get((hdr or {}).get("header", {}).get("alg", "HS256").upper(), hashlib.sha256)
+    words = list(HMAC_SECRET_WORDLIST)
+    if extra_words:
+        words += list(extra_words)
+    for secret in words:
+        calc = _b64url(hmac.new(secret.encode(), signing_input, algo).digest())
+        if hmac.compare_digest(calc, target):
+            return secret
+    return None
+
+
+def _forge_none_alg(jwt_data):
+    """Build an alg:none forgery of the token (unsigned)."""
+    hdr = dict(jwt_data["header"]); hdr["alg"] = "none"
+    h = _b64url(json.dumps(hdr, separators=(",", ":")).encode())
+    p = _b64url(json.dumps(jwt_data["payload"], separators=(",", ":")).encode())
+    return f"{h}.{p}."
+
+
+def _analyze_jwt_deep(jwt_data, token, email=None, extra_words=None):
+    """Full offline JWT audit. Returns list of (severity, description)."""
+    results = []
+    header = jwt_data["header"]
+    payload = jwt_data["payload"]
+    alg = str(header.get("alg", ""))
+
+    results.append(("INFO", f"JWT detected | alg: {alg}"))
+    results.append(("INFO", f"  header: {json.dumps(header)}"))
+    results.append(("INFO", f"  payload: {json.dumps(payload)}"))
+
+    # --- alg:none (already forgeable) ---
+    if alg.lower() in ("none", ""):
+        results.append(("CRITICAL", "alg:none → signature not verified, token trivially forgeable"))
+        results.append(("INFO", f"  forge: {_forge_none_alg(jwt_data)}"))
+
+    # --- HS* weak secret crack + none/confusion vectors ---
+    elif alg.upper().startswith("HS"):
+        secret = crack_hs_secret(token, extra_words=extra_words)
+        if secret is not None:
+            results.append(("CRITICAL", f"HMAC secret cracked: '{secret}' → you can forge ANY token (full ATO)"))
+            results.append(("INFO", "  re-sign a tampered payload with this secret to bypass the flow"))
+        else:
+            results.append(("MEDIUM", f"{alg} → weak-secret not in inline list; run heavy dictionary:"))
+            results.append(("INFO", f"  echo '{token}' > jwt.txt && hashcat -m 16500 jwt.txt rockyou.txt"))
+        # alg:none downgrade is always worth a manual try on the consuming endpoint
+        results.append(("INFO", f"  test alg:none downgrade → {_forge_none_alg(jwt_data)}"))
+
+    # --- RS/ES/PS → key-confusion ---
+    elif alg.upper().startswith(("RS", "ES", "PS")):
+        results.append(("MEDIUM", f"{alg} → test RS256→HS256 key confusion (sign with the public key as HMAC secret)"))
+
+    # --- dangerous header params ---
+    for p, why in DANGEROUS_HEADER_PARAMS.items():
+        if p in header:
+            sev = "HIGH" if p in ("jku", "x5u", "kid") else "MEDIUM"
+            results.append((sev, f"header '{p}={header[p]}' → {why}"))
+
+    # --- enumerable user id inside a reset-token JWT (universal-ATO pattern) ---
+    # A reset token that is a signed JWT carrying a numeric, sequential user id
+    # (Wyylde: {"id":"7269423",...}) rests its ENTIRE security on the HMAC secret:
+    # crack/leak it once and you forge a valid reset for every user id. Best practice
+    # is an opaque random token, not a signed id.
+    _ID_KEYS = {"id", "uid", "user_id", "userid", "account_id", "accountid",
+                "customer_id", "customerid", "cid", "sub"}
+    for k, v in payload.items():
+        if k.lower() in _ID_KEYS and str(v).isdigit():
+            results.append(("HIGH", f"reset token is a JWT bound to an enumerable numeric {k}={v} → "
+                                    f"one weak/leaked HMAC secret = forge a reset for ANY user id (universal ATO)"))
+            break
+
+    # --- sensitive claims shipped to the client ---
+    for k, v in payload.items():
+        if k.lower() in SENSITIVE_CLAIM_KEYS:
+            sval = str(v)
+            results.append(("HIGH", f"sensitive claim exposed to client: {k}={sval[:60]}{'…' if len(sval) > 60 else ''}"))
+
+    # --- email in payload (user-scoped, useful for tampering) ---
+    if email:
+        for k, v in payload.items():
+            if isinstance(v, str) and email.lower() in v.lower():
+                results.append(("HIGH", f"email in JWT payload: {k}={v} → tamper to target another user"))
+
+    # --- expiry hygiene ---
+    now = time.time()
+    exp = payload.get("exp")
+    iat = payload.get("iat")
+    if exp is None:
+        results.append(("MEDIUM", "no 'exp' claim → token never expires (replayable indefinitely)"))
+    else:
+        try:
+            exp = float(exp)
+            if exp < now:
+                results.append(("INFO", "token already expired (get a fresh one to test forgery)"))
+            if iat is not None:
+                life = exp - float(iat)
+                if life > 3600:
+                    results.append(("MEDIUM", f"long lifetime: {int(life)}s (~{int(life/60)} min) → wide replay window"))
+        except (TypeError, ValueError):
+            pass
+    if "jti" not in payload:
+        results.append(("INFO", "no 'jti' → no server-side single-use tracking, aids replay"))
+
+    return results
+
+
 # ─── Token analysis core ─────────────────────────────────────────────────────
 
-def _analyze_token(token, email=None, response_timestamp=None):
+def _analyze_token(token, email=None, response_timestamp=None, extra_words=None):
     """Analyze a single token. Returns list of (severity, description) findings."""
     results = []
     entropy = _shannon_entropy(token)
 
-    # --- JWT ---
+    # --- JWT (full offline audit: weak secret, alg confusion, claim/header abuse) ---
     jwt_data = _is_jwt(token)
     if jwt_data:
-        alg = jwt_data["header"].get("alg", "")
-        results.append(("INFO", f"JWT detected | alg: {alg}"))
-        results.append(("INFO", f"  header: {json.dumps(jwt_data['header'])}"))
-        results.append(("INFO", f"  payload: {json.dumps(jwt_data['payload'])}"))
-
-        if alg.lower() == "none":
-            results.append(("CRITICAL", "alg:none → signature not verified, token forgeable"))
-        elif alg.upper().startswith("HS"):
-            results.append(("MEDIUM", f"{alg} → test key confusion RS256→HS256 and weak secrets"))
-
-        if email:
-            for k, v in jwt_data["payload"].items():
-                if isinstance(v, str) and email.lower() in v.lower():
-                    results.append(("HIGH", f"email found in JWT payload: {k}={v}"))
-        return results
+        return _analyze_jwt_deep(jwt_data, token, email=email, extra_words=extra_words)
 
     # --- PHP uniqid ---
     uniqid_ts = _reverse_php_uniqid(token)
@@ -375,6 +540,58 @@ def _compare_tokens(tokens, timestamps=None):
 
 # ─── Main entry point ─────────────────────────────────────────────────────────
 
+def _tokens_from_reset_input(raw):
+    """Pull candidate tokens out of a reset URL or a bare token pasted from an email."""
+    found = []
+    for m in JWT_RE.finditer(raw):
+        if m.group(1) not in found:
+            found.append(m.group(1))
+    if "://" in raw or "?" in raw:
+        try:
+            q = urllib.parse.urlparse(raw).query or raw.split("?", 1)[-1]
+            params = urllib.parse.parse_qs(q)
+            for key in ("token", "code", "t", "key", "reset_token", "resetToken",
+                        "auth", "oobCode", "otp", "verify", "confirmation", "hash"):
+                for val in params.get(key, []):
+                    if val and val not in found:
+                        found.append(val)
+        except Exception:
+            pass
+    if not found:
+        cand = raw.strip()
+        if len(cand) >= 8 and " " not in cand:
+            found.append(cand)
+    return found
+
+
+def analyze_reset_material(raw, victim_email=None):
+    """
+    Deep-analyze a reset token or full reset URL pasted from a received email —
+    the crown-jewel material that never appears in the HTTP response, so the normal
+    token-leakage module can't see it. Runs the full JWT/entropy/time-based audit.
+    """
+    print(f"{Colors.CYAN} ├ Reset token analysis (from email){Colors.RESET}")
+    raw = (raw or "").strip()
+    if not raw:
+        print(f"{Colors.YELLOW}   └── [!] empty value{Colors.RESET}")
+        return
+    tokens = _tokens_from_reset_input(raw)
+    if not tokens:
+        print(f"{Colors.YELLOW}   └── [!] no token found in the provided value{Colors.RESET}")
+        return
+    for tok in tokens:
+        disp = tok[:80] + ("…" if len(tok) > 80 else "")
+        print(f"{Colors.MAGENTA}   └── token ({len(tok)} chars): {disp}{Colors.RESET}")
+        findings = _analyze_token(tok, email=victim_email)
+        impactful = [f for f in findings if f[0] in ("CRITICAL", "HIGH", "MEDIUM")]
+        if not impactful:
+            print(f"{Colors.GREEN}       [OK] no weakness detected (looks random/opaque){Colors.RESET}")
+        for severity, desc in findings:
+            color = Colors.RED if severity in ("CRITICAL", "HIGH") else (
+                Colors.YELLOW if severity == "MEDIUM" else Colors.CYAN)
+            print(f"{color}       [{severity}] {desc}{Colors.RESET}")
+
+
 def token_analysis(url, parsed_req, baseline, interact, email, proxy=None):
     """
     Token leakage detection + quality analysis.
@@ -410,6 +627,7 @@ def token_analysis(url, parsed_req, baseline, interact, email, proxy=None):
 
     for i in range(NUM_REQUESTS):
         try:
+            live.testing(f"token-analysis request #{i+1}/{NUM_REQUESTS}")
             resp = requests.request(
                 method=method, url=uri, headers=headers,
                 data=body or None, verify=False, allow_redirects=False,
@@ -425,7 +643,13 @@ def token_analysis(url, parsed_req, baseline, interact, email, proxy=None):
                     all_tokens.append((token, source, i + 1, resp_ts))
                     print(f"{Colors.RED}   └── [+] TOKEN IN RESPONSE | {source} | req #{i+1}{Colors.RESET}")
                     print(f"{Colors.RED}       → {token[:100]}{'...' if len(token) > 100 else ''}{Colors.RESET}")
-                    print(f"{Colors.RED}       impact: ATO — token accessible without victim's email{Colors.RESET}")
+                    # A flow-state / journey token (authId) still gates on the emailed
+                    # OTP, so it's not an instant ATO — don't overclaim. A genuine reset
+                    # secret (reset_token, code, otp) leaking here IS direct ATO.
+                    if "authId" in source or "flowToken" in source or "continueToken" in source:
+                        print(f"{Colors.YELLOW}       impact: auth-flow state token exposed — analyze below (weak JWT secret / alg confusion / embedded secrets){Colors.RESET}")
+                    else:
+                        print(f"{Colors.RED}       impact: ATO — reset secret accessible without victim's email{Colors.RESET}")
 
             if i < NUM_REQUESTS - 1:
                 time.sleep(0.5)

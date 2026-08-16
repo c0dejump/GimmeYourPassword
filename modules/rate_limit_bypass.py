@@ -5,6 +5,7 @@ sys.dont_write_bytecode = True
 import random
 from utils.style import Colors
 from utils.utils import requests
+from utils import live
 
 
 RATE_LIMIT_KEYWORDS = [
@@ -73,6 +74,7 @@ def rate_limit_bypass(url, parsed_req, baseline, interact, email, proxy=None):
 
     for i in range(PROBE_COUNT):
         try:
+            live.testing(f"rate-limit probe #{i+1}/{PROBE_COUNT}")
             resp = requests.request(
                 method=method, url=uri, headers=headers,
                 data=body or None, verify=False, allow_redirects=False,
@@ -100,6 +102,7 @@ def rate_limit_bypass(url, parsed_req, baseline, interact, email, proxy=None):
         bypass_headers[spoof_header] = fake_ip
 
         try:
+            live.testing(f"rate-limit bypass {spoof_header}: {fake_ip}")
             resp = requests.request(
                 method=method, url=uri, headers=bypass_headers,
                 data=body or None, verify=False, allow_redirects=False,
@@ -119,6 +122,7 @@ def rate_limit_bypass(url, parsed_req, baseline, interact, email, proxy=None):
         bypass_headers = headers.copy()
         bypass_headers["X-Forwarded-For"] = special_ip
         try:
+            live.testing(f"rate-limit loopback X-Forwarded-For: {special_ip}")
             resp = requests.request(
                 method=method, url=uri, headers=bypass_headers,
                 data=body or None, verify=False, allow_redirects=False,

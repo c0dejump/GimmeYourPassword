@@ -63,7 +63,30 @@ def args() -> argparse.Namespace:
         "-e",
         "--email",
         dest="email",
-        help="controlled email",
+        help="Attacker-controlled email to hijack the reset to (catch-all: invent any localpart on your sink domain)",
+        required=False,
+        )
+    group.add_argument(
+        "--mail-wait",
+        dest="mail_wait",
+        type=int,
+        default=30,
+        help="Seconds to wait/poll the mailbox for the hijacked reset email (default: 30)",
+        required=False,
+        )
+    group.add_argument(
+        "--disposable-mail",
+        dest="disposable_mail",
+        action="store_true",
+        help="Auto-provision a throwaway inbox (mail.tm) and use it as -e (no domain/VPS needed)",
+        required=False,
+        )
+    group.add_argument(
+        "--reset-url",
+        dest="reset_url",
+        default=None,
+        help="Reset link OR token pasted from the received email — deep-analyzes the "
+             "token offline (JWT weak-secret/alg, enumerable id, entropy, time-based)",
         required=False,
         )
 

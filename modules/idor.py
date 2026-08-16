@@ -7,6 +7,7 @@ import re
 import urllib.parse
 from utils.style import Colors
 from utils.utils import requests, detect_content_type
+from utils import live
 
 
 IDOR_PARAM_NAMES = [
@@ -124,6 +125,7 @@ def idor(url, parsed_req, baseline, interact, email, proxy=None):
             if new_value == original_value:
                 continue
             try:
+                live.testing(f"idor {param_name}={new_value}")
                 mutated_body = _mutate_body(body, content_type, param_name, new_value)
                 if mutated_body == body:
                     continue

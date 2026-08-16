@@ -4,6 +4,7 @@ sys.dont_write_bytecode = True
 
 from utils.style import Colors
 from utils.utils import requests, human_time, get_domain_from_url, CANARY
+from utils import live
 
 
 def _build_payloads(attacker_domain, original_host):
@@ -61,6 +62,7 @@ def referrer_manipulation(url, human, parsed_req, baseline, interact, proxy=None
         test_headers.update(injected_headers)
 
         try:
+            live.testing(f"referrer {injected_headers}")
             human_time(human)
             resp = requests.request(
                 method=method, url=uri, headers=test_headers,

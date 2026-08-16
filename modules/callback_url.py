@@ -6,6 +6,7 @@ import json as _json
 import urllib.parse
 from utils.style import Colors
 from utils.utils import requests, get_domain_from_url, CANARY
+from utils import live
 
 
 REDIRECT_PARAMS = [
@@ -99,6 +100,7 @@ def callback_url(url, parsed_req, baseline, interact, email, proxy=None):
     print(f"{Colors.CYAN} └─ Injecting {len(REDIRECT_PARAMS)} redirect params (body + QS){Colors.RESET}")
 
     for param in REDIRECT_PARAMS:
+        live.testing(f"callback-url {param}")
         # Body injection
         if body:
             modified_body = _inject_json(body, param, attacker_url) if is_json \

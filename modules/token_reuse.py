@@ -6,6 +6,7 @@ import time
 import re
 from utils.style import Colors
 from utils.utils import requests
+from utils import live
 from modules.token_analysis import _extract_tokens_from_response
 
 
@@ -46,6 +47,7 @@ def token_reuse(url, parsed_req, baseline, interact, email, proxy=None):
 
     for i in range(NUM_REQUESTS):
         try:
+            live.testing(f"token-reuse request #{i+1}/{NUM_REQUESTS}")
             resp = requests.request(
                 method=method, url=uri, headers=headers,
                 data=body or None, verify=False, allow_redirects=False,
@@ -87,6 +89,7 @@ def token_reuse(url, parsed_req, baseline, interact, email, proxy=None):
 
         for reset_url in collected_urls[:3]:
             try:
+                live.testing(f"token-reuse replay {reset_url[:60]}")
                 resp1 = requests.get(reset_url, verify=False, allow_redirects=False, timeout=10, proxies=proxies)
                 time.sleep(0.5)
                 resp2 = requests.get(reset_url, verify=False, allow_redirects=False, timeout=10, proxies=proxies)

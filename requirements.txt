@@ -3,3 +3,5 @@ urllib3==2.2.1
 pync==2.0.3
 bs4
 h11
+flask
+aiosmtpd

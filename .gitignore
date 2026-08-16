@@ -1,0 +1,15 @@
+__pycache__
+.vscode/
+*_cache/
+.venv/
+dist/
+build/
+dev/
+error_logs/*.log
+*.txt
+todo.md
+*.egg-info/
+.py3
+.coverage
+results/*.html
+req_exemple.txt

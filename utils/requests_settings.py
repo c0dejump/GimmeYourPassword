@@ -39,8 +39,10 @@ def send_baseline(url, parsed_req, proxy=None):
             timeout=10, proxies=proxies,
         )
         return {
+            # keep enough body for "new indicator vs baseline" checks on large HTML
+            # pages (truncating to 5k made words past 5k look "absent from baseline")
             "status": resp.status_code,
-            "body": resp.text[:5000],
+            "body": resp.text[:200000],
             "body_length": len(resp.text),
             "headers": dict(resp.headers),
             "error": None,

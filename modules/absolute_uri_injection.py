@@ -11,6 +11,7 @@ from utils.utils import (
     check_raw_response,
 )
 from utils.requests_settings import _raw_request
+from utils import live
 
 
 def absolute_uri_injection(url, human, parsed_req, baseline, interact, proxy=None):
@@ -83,6 +84,7 @@ def absolute_uri_injection(url, human, parsed_req, baseline, interact, proxy=Non
 
     for target, desc in targets:
         try:
+            live.testing(f"absolute-uri {desc}")
             human_time(human)
             # Build raw request — just swap path for absolute URI target
             request_line = f"{method} {target} HTTP/1.1\r\n"

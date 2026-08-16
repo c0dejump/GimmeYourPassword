@@ -5,6 +5,7 @@ sys.dont_write_bytecode = True
 import json as _json
 from utils.style import Colors
 from utils.utils import requests
+from utils import live
 
 
 OTP_KEYWORDS = ["verifyotp", "verifycode", "verifytoken", "checkotp", "submitotp",
@@ -240,6 +241,7 @@ def graphql(url, parsed_req, baseline, interact, email, proxy=None):
 
     bypass_found = False
     for bypass_name in bypass_names[:6]:
+        live.testing(f"graphql opname bypass {bypass_name}")
         renamed_query = query.replace(op_name, bypass_name, 1) if op_name else query
         renamed_body = {
             "query": renamed_query,

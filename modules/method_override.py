@@ -8,18 +8,50 @@ from utils.utils import (
     re,
     json,
     urlparse,
-    get_domain_from_url,
-    EMAIL_REGEX,
-    SUCCESS_INDICATORS,
+    detect_anti_automation,
 )
 import shlex
+import urllib.parse
+from utils import live
+
+
+def _body_to_query(body, headers):
+    """
+    Convert a request body into a query string so GET-based tests are meaningful.
+    A JSON body appended raw to the URL (`?{"email":"..."}`) is never parsed by the
+    server, so for JSON we flatten the top-level scalar fields into real params.
+    Returns "" when no sensible query can be built (caller then sends a plain GET).
+    """
+    if not body:
+        return ""
+    ct = ""
+    for k, v in headers.items():
+        if k.lower() == "content-type":
+            ct = v.lower()
+    if "application/json" in ct:
+        try:
+            data = json.loads(body)
+            if isinstance(data, dict):
+                flat = {k: v for k, v in data.items()
+                        if isinstance(v, (str, int, float, bool))}
+                return urllib.parse.urlencode(flat)
+        except Exception:
+            pass
+        return ""
+    # already form-urlencoded (or unknown k=v pairs) → usable as-is
+    return body
+
+
+# Auth headers that carry YOUR session — never dump them into a shareable PoC.
+_REDACT_HEADERS = ("content-length", "host", "cookie", "authorization",
+                   "x-csrf-token", "x-xsrf-token", "x-csrftoken")
 
 
 def _build_curl(method, url, headers, body=None):
-    """Build a copy-pastable curl command as PoC."""
+    """Build a copy-pastable curl command as PoC (auth/session headers redacted)."""
     parts = [f"curl -sk -X {method}"]
     for k, v in headers.items():
-        if k.lower() in ("content-length", "host"):
+        if k.lower() in _REDACT_HEADERS:
             continue
         parts.append(f"-H {shlex.quote(f'{k}: {v}')}")
     if body:
@@ -30,31 +62,22 @@ def _build_curl(method, url, headers, body=None):
 
 def _is_confirmed(resp, baseline):
     """
-    A method override is confirmed if:
-    - Same status as baseline AND body length within 20% range
-    - OR success indicators found in body
+    Low-confidence 'candidate' check for an alternate method being processed.
+
+    NOTE: on an endpoint that renders HTML (not a JSON API), "200 + body ≈ baseline"
+    is NOT proof — the app happily returns 200 for many methods and the word
+    "success" appears all over the markup. So we do NOT treat same-status/same-length
+    as confirmation, and we do NOT substring-match "success". Real confirmation of a
+    reset requires OOB email (see mail_analysis). Here we only surface a candidate
+    when the alternate method yields a 2xx/3xx that is NOT a client-error rejection.
     """
-    if resp.status_code != baseline["status"]:
+    code = resp.status_code
+    if code in (400, 401, 403, 404, 405, 422, 429):
         return False, None
-
-    body_len = len(resp.text)
-    baseline_len = baseline["body_length"]
-
-    # Body length within 20% of baseline → likely same behavior
-    if baseline_len > 0:
-        ratio = abs(body_len - baseline_len) / baseline_len
-        if ratio > 0.20:
-            return False, None
-
-    # Check for success indicators
-    resp_lower = resp.text.lower()
-    for indicator in SUCCESS_INDICATORS:
-        if indicator in resp_lower:
-            return True, indicator
-
-    # Same status + similar length but no explicit success indicator
-    # Still likely confirmed
-    return True, None
+    if code >= 500:
+        return False, None
+    # a 2xx/3xx that isn't an outright rejection → candidate only
+    return True, f"status={code}, len={len(resp.text)}b (candidate — confirm via OOB)"
 
 
 def method_override(url, parsed_req, baseline, interact, email, proxy=None):
@@ -63,6 +86,15 @@ def method_override(url, parsed_req, baseline, interact, email, proxy=None):
     Only reports confirmed findings with curl PoC.
     """
     print(f"{Colors.CYAN} ├ Method override analysis{Colors.RESET}")
+
+    # With a single-use captcha/token in the request, every replay after the
+    # baseline is rejected server-side while often still returning 200 — so a
+    # "200 for GET/PUT/PATCH" tells us nothing. Replay-based confirmation is
+    # meaningless here; skip rather than emit noise.
+    if detect_anti_automation(parsed_req):
+        print(f"{Colors.CYAN}   └── [i] single-use captcha/token present → replay-based method-override "
+              f"confirmation is unreliable; skipped (use --disposable-mail to confirm via OOB){Colors.RESET}")
+        return
 
     original_host = parsed_req["host"]
     method = parsed_req["method"]
@@ -84,9 +116,10 @@ def method_override(url, parsed_req, baseline, interact, email, proxy=None):
 
     for alt in alt_methods:
         try:
+            live.testing(f"method-override switch {alt}")
             if alt == "GET" and body:
-                separator = "&" if "?" in uri else "?"
-                test_uri = f"{uri}{separator}{body}"
+                qs = _body_to_query(body, headers)
+                test_uri = f"{uri}{'&' if '?' in uri else '?'}{qs}" if qs else uri
                 resp = requests.request(
                     method=alt, url=test_uri, headers=headers,
                     verify=False, allow_redirects=False,
@@ -103,17 +136,15 @@ def method_override(url, parsed_req, baseline, interact, email, proxy=None):
 
             confirmed, indicator = _is_confirmed(resp, baseline)
             if confirmed:
-                risk = "HIGH" if alt == "GET" else "MEDIUM"
-                reason = f"success indicator: '{indicator}'" if indicator else f"status={resp.status_code}, len={len(resp.text)}b ≈ baseline"
-
+                reason = indicator
                 if alt == "GET":
-                    desc = f"{risk} — GET accepted → no CSRF needed, token leaks via Referer/logs, CSRF via <img>"
+                    desc = f"INFO — GET accepted (candidate) → if it triggers the reset: no CSRF token needed, token may leak via Referer/logs"
                 else:
-                    desc = f"{risk} — {alt} accepted → alternative method bypass"
+                    desc = f"INFO — {alt} accepted (candidate) → alternative method reaches the handler"
 
                 findings.append((desc, reason, curl_cmd))
-                print(f"{Colors.GREEN}   └── [+] {desc}{Colors.RESET}")
-                print(f"{Colors.GREEN}       {reason}{Colors.RESET}")
+                print(f"{Colors.CYAN}   └── [i] {desc}{Colors.RESET}")
+                print(f"{Colors.CYAN}       {reason}{Colors.RESET}")
 
         except requests.RequestException:
             pass
@@ -136,12 +167,13 @@ def method_override(url, parsed_req, baseline, interact, email, proxy=None):
     for carrier in carrier_methods:
         for override_hdr in override_headers_list:
             try:
+                live.testing(f"method-override {carrier} + {override_hdr}: {method}")
                 test_headers = headers.copy()
                 test_headers[override_hdr] = method
 
                 if carrier == "GET" and body:
-                    separator = "&" if "?" in uri else "?"
-                    test_uri = f"{uri}{separator}{body}"
+                    qs = _body_to_query(body, headers)
+                    test_uri = f"{uri}{'&' if '?' in uri else '?'}{qs}" if qs else uri
                     resp = requests.request(
                         method=carrier, url=test_uri, headers=test_headers,
                         verify=False, allow_redirects=False,
@@ -158,10 +190,9 @@ def method_override(url, parsed_req, baseline, interact, email, proxy=None):
 
                 confirmed, indicator = _is_confirmed(resp, baseline)
                 if confirmed:
-                    risk = "HIGH" if carrier == "GET" else "MEDIUM"
-                    reason = f"success indicator: '{indicator}'" if indicator else f"status={resp.status_code}, len={len(resp.text)}b ≈ baseline"
-                    desc = f"{risk} — {carrier} + {override_hdr}: {method} → backend treats as {method}"
-                    _p2.setdefault((risk, resp.status_code, len(resp.text)), []).append((desc, reason, curl_cmd))
+                    reason = indicator
+                    desc = f"INFO — {carrier} + {override_hdr}: {method} (candidate) → possible method override"
+                    _p2.setdefault((resp.status_code, len(resp.text)), []).append((desc, reason, curl_cmd))
 
             except requests.RequestException:
                 pass
@@ -170,13 +201,13 @@ def method_override(url, parsed_req, baseline, interact, email, proxy=None):
     for _key, _items in _p2.items():
         if len(_items) >= _DEDUP:
             _d, _r, _c = _items[0]
-            print(f"{Colors.GREEN}   └── [+] {_d} (×{len(_items)} combinations){Colors.RESET}")
-            print(f"{Colors.GREEN}       {_r}{Colors.RESET}")
+            print(f"{Colors.CYAN}   └── [i] {_d} (×{len(_items)} combinations){Colors.RESET}")
+            print(f"{Colors.CYAN}       {_r}{Colors.RESET}")
             findings.append((_d, _r, _c))
         else:
             for _d, _r, _c in _items:
-                print(f"{Colors.GREEN}   └── [+] {_d}{Colors.RESET}")
-                print(f"{Colors.GREEN}       {_r}{Colors.RESET}")
+                print(f"{Colors.CYAN}   └── [i] {_d}{Colors.RESET}")
+                print(f"{Colors.CYAN}       {_r}{Colors.RESET}")
                 findings.append((_d, _r, _c))
 
     # --- Phase 3: Query parameter override ---
@@ -188,9 +219,11 @@ def method_override(url, parsed_req, baseline, interact, email, proxy=None):
 
     for param in param_overrides:
         try:
+            live.testing(f"method-override query {param}={method}")
             separator = "&" if "?" in uri else "?"
-            if body:
-                test_uri = f"{uri}{separator}{body}&{param}={method}"
+            qs = _body_to_query(body, headers)
+            if qs:
+                test_uri = f"{uri}{separator}{qs}&{param}={method}"
             else:
                 test_uri = f"{uri}{separator}{param}={method}"
 
@@ -203,8 +236,8 @@ def method_override(url, parsed_req, baseline, interact, email, proxy=None):
 
             confirmed, indicator = _is_confirmed(resp, baseline)
             if confirmed:
-                reason = f"success indicator: '{indicator}'" if indicator else f"status={resp.status_code}, len={len(resp.text)}b ≈ baseline"
-                desc = f"HIGH — GET + ?{param}={method} → framework treats as {method} (Rails/Laravel pattern)"
+                reason = indicator
+                desc = f"INFO — GET + ?{param}={method} (candidate) → framework may treat as {method} (Rails/Laravel pattern)"
                 _p3.setdefault((resp.status_code, len(resp.text)), []).append((desc, reason, curl_cmd))
 
         except requests.RequestException:
@@ -213,13 +246,13 @@ def method_override(url, parsed_req, baseline, interact, email, proxy=None):
     for _key, _items in _p3.items():
         if len(_items) >= _DEDUP:
             _d, _r, _c = _items[0]
-            print(f"{Colors.GREEN}   └── [+] {_d} (×{len(_items)} params){Colors.RESET}")
-            print(f"{Colors.GREEN}       {_r}{Colors.RESET}")
+            print(f"{Colors.CYAN}   └── [i] {_d} (×{len(_items)} params){Colors.RESET}")
+            print(f"{Colors.CYAN}       {_r}{Colors.RESET}")
             findings.append((_d, _r, _c))
         else:
             for _d, _r, _c in _items:
-                print(f"{Colors.GREEN}   └── [+] {_d}{Colors.RESET}")
-                print(f"{Colors.GREEN}       {_r}{Colors.RESET}")
+                print(f"{Colors.CYAN}   └── [i] {_d}{Colors.RESET}")
+                print(f"{Colors.CYAN}       {_r}{Colors.RESET}")
                 findings.append((_d, _r, _c))
 
     # --- Phase 4: CSRF bypass via method ---
@@ -256,6 +289,7 @@ def method_override(url, parsed_req, baseline, interact, email, proxy=None):
 
         for test_method in [method, "PUT", "PATCH"]:
             try:
+                live.testing(f"method-override csrf-bypass {test_method}")
                 resp = requests.request(
                     method=test_method, url=uri, headers=stripped_headers,
                     data=stripped_body or None, verify=False, allow_redirects=False,
@@ -265,11 +299,11 @@ def method_override(url, parsed_req, baseline, interact, email, proxy=None):
 
                 confirmed, indicator = _is_confirmed(resp, baseline)
                 if confirmed:
-                    reason = f"success indicator: '{indicator}'" if indicator else f"status={resp.status_code}, len={len(resp.text)}b ≈ baseline"
-                    desc = f"CRITICAL — {test_method} without CSRF token → {resp.status_code} (CSRF bypass confirmed)"
+                    reason = indicator
+                    desc = f"INFO — {test_method} without CSRF token → {resp.status_code} (candidate — confirm the reset actually fired via OOB)"
                     findings.append((desc, reason, curl_cmd))
-                    print(f"{Colors.RED}   └── [+] {desc}{Colors.RESET}")
-                    print(f"{Colors.RED}       {reason}{Colors.RESET}")
+                    print(f"{Colors.CYAN}   └── [i] {desc}{Colors.RESET}")
+                    print(f"{Colors.CYAN}       {reason}{Colors.RESET}")
 
             except requests.RequestException:
                 pass
