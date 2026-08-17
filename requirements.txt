@@ -5,3 +5,4 @@ bs4
 h11
 flask
 aiosmtpd
+dnspython

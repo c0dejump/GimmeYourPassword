@@ -40,6 +40,7 @@ from modules.race_condition import race_condition
 from modules.csrf import csrf
 from modules.rate_limit_bypass import rate_limit_bypass
 from modules.referrer_manipulation import referrer_manipulation
+from modules.dns_analysis import dns_analysis
 from modules.graphql import graphql
 from modules.callback_url import callback_url
 from modules.param_discovery import param_discovery
@@ -107,6 +108,7 @@ def process_modules(url, parsed_req, interact, baseline, email, human, proxy=Non
     run(callback_url, url, parsed_req, fresh(), interact, email, proxy)
     run(param_discovery, url, parsed_req, fresh(), interact, email, proxy)
     run(referrer_manipulation, url, human, parsed_req, fresh(), interact, proxy)
+    run(dns_analysis, url, parsed_req, clean_baseline, interact, email, proxy)
     # Runs last: give every reset-triggering payload time to deliver before we poll
     # the SMTP sink for the hijacked email. Uses clean_baseline (no extra request).
     run(mail_analysis, url, parsed_req, clean_baseline, interact, email, proxy, mail_wait, mailbox)
