@@ -32,6 +32,7 @@ from modules.absolute_uri_injection import absolute_uri_injection
 from modules.token_analysis import token_analysis
 from modules.token_reuse import token_reuse
 from modules.method_override import method_override
+from modules.extension_bypass import extension_bypass
 from modules.otp_bruteforce import otp_bruteforce
 from modules.broken_logic import broken_logic
 from modules.idor import idor
@@ -95,6 +96,7 @@ def process_modules(url, parsed_req, interact, baseline, email, human, proxy=Non
     run(token_analysis, url, parsed_req, fresh(), interact, email, proxy)
     run(token_reuse, url, parsed_req, fresh(), interact, email, proxy)
     run(method_override, url, parsed_req, fresh(), interact, email, proxy)
+    run(extension_bypass, url, parsed_req, fresh(), interact, email, proxy)
     # Only fires when the request is a code/OTP submission (short numeric code
     # field); otherwise it self-skips. Bounded + stops on lockout by design.
     run(otp_bruteforce, url, parsed_req, fresh(), interact, email, proxy)
