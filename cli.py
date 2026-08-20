@@ -43,8 +43,9 @@ def args() -> argparse.Namespace:
         "-u",
         "--url",
         dest="url",
-        help=f"URL to test {Colors.RED}[required]{Colors.RESET} if no -f/--file provided",
-        required=True
+        help="Optional. Host/path come from -r (the raw request); this only sets the "
+             "scheme (default https). Pass e.g. -u http://host to force plain HTTP.",
+        required=False
     )
     group.add_argument(
         "-r",
@@ -123,16 +124,18 @@ def args() -> argparse.Namespace:
         "--proxy",
         dest="proxy",
         nargs='?',
-        const='',  # Default value when --proxy is provided without argument
-        help="Proxy all requests through this proxy (format: host:port, default: 127.0.0.1:8080)",
+        const='http://127.0.0.1:8080',  # bare -p → route through local Burp
+        help="Proxy all requests (host:port; bare -p defaults to http://127.0.0.1:8080). "
+             "Useful to bypass WAF client-fingerprinting: the upstream request is then "
+             "re-issued by Burp, whose TLS/HTTP fingerprint the site already accepts.",
         required=False,
     )
     group.add_argument(
         "--burp",
         dest="burp",
         nargs='?',
-        const='',  # Default value when --burp is provided without argument
-        help="Send behavior and confirmed requests to Burp proxy (format: host:port, default: 127.0.0.1:8080)",
+        const='http://127.0.0.1:8080',  # bare --burp → local Burp
+        help="Send behavior and confirmed requests to Burp proxy (host:port, default http://127.0.0.1:8080)",
         required=False,
     )
 
@@ -143,8 +146,5 @@ def args() -> argparse.Namespace:
 
     args = parser.parse_args()
 
-    # Validate that either URL or file is provided
-    if not args.url:
-        parser.error("Either -u/--url")
-
+    # -u is optional (scheme only); -r is required and carries host/path/body.
     return args

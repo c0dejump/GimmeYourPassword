@@ -36,7 +36,10 @@ def _variants(path):
         (f"{base}%20{qs}", "trailing %20"),
         (f"{base}%09{qs}", "trailing tab"),
         (f"//{base.lstrip('/')}{qs}", "leading //"),
-        (f"{base}#.json{qs}", "fragment #.json"),
+        # NOTE: no '#'-fragment variant. A fragment is stripped client-side and never
+        # transmitted, so `/graph#.json?qs` collapses to `/graph` (losing BOTH the
+        # suffix and the query). That is not an ACL/suffix test — it just hits the
+        # bare path, which reliably produced a false "gated 403 → 200 bypass".
     ]
     # de-dup while preserving order
     seen, uniq = set(), []
@@ -92,8 +95,22 @@ def extension_bypass(url, parsed_req, baseline, interact, email, proxy=None):
     except requests.RequestException:
         ctrl_sig = None
 
+    # What the client will ACTUALLY put on the request line for the untouched path
+    # (fragments stripped, dot-segments normalised, etc.). Any variant that collapses
+    # to this — i.e. its mutation never reaches the wire — is not a real suffix test.
+    def _wire_target(vpath):
+        try:
+            return requests.Request(method, f"{scheme}://{original_host}{vpath}").prepare().path_url
+        except Exception:
+            return vpath
+    base_wire = _wire_target(path)
+    bare_wire = _wire_target(b)  # path without its query string
+
     groups = {}  # sig -> [(tag, vpath, status, len)]
     for vpath, tag in _variants(path):
+        wire = _wire_target(vpath)
+        if wire == base_wire or wire == bare_wire:
+            continue  # mutation didn't survive to the wire (e.g. fragment) → not a test
         try:
             live.testing(f"ext-bypass {tag}")
             resp = _send(vpath)

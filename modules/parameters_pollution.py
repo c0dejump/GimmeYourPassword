@@ -24,6 +24,33 @@ import uuid
 from utils import live
 
 
+def _looks_rendered_page(resp):
+    """
+    True when the response is a full HTML document rather than a small API/redirect
+    confirmation. A genuine "reset accepted" reply is a redirect or a short JSON/text
+    body — never a 100 KB rendered page. When a mutated request merely makes the app
+    RE-RENDER the reset form (e.g. text/plain CT, duplicate params), the word
+    "success" almost always appears in the page chrome, producing a false "new
+    indicator" hit — especially when the baseline was an empty 3xx redirect (0 bytes,
+    so every word counts as "new"). We use this to suppress those.
+    """
+    ct = (resp.headers.get("Content-Type") or "").lower()
+    head = (resp.text or "")[:600].lower()
+    is_html = "text/html" in ct or "<!doctype html" in head or "<html" in head
+    return is_html and len(resp.text or "") > 2000
+
+
+def _looks_validation_error(text):
+    """True when the response reads as an input-validation rejection (e.g. SuperTokens
+    {"status":"FIELD_ERROR",...,"error":"Email is invalid"}). A size/status change that
+    is JUST this means the payload was REJECTED, not accepted — so we annotate it as
+    benign instead of leaving a bare anomaly the analyst has to re-test by hand."""
+    low = (text or "").lower()
+    return any(m in low for m in (
+        "field_error", "invalid", "not valid", "malformed", "must be a valid",
+        '"error"', "'error'", "validation", "badrequest", "bad request"))
+
+
 def _is_error_echo(resp_text, email):
     """
     True when `email` only appears inside a JSON/GraphQL error message — i.e. the
@@ -179,8 +206,12 @@ def get_email_param_names(body):
     # -------------------------
     # raw fallback
     # -------------------------
+    # Key charclass must NOT include the param delimiters = & , ; ? — otherwise on a
+    # form body like "act=find&email=victim%40x.com" the greedy match swallows the
+    # earlier params and yields a bogus key "act=find&email" alongside the real
+    # "email", which the caller then reads as "multiple email params → ambiguous".
     matches = re.findall(
-        rf'"?([^"\s:]+)"?\s*[:=]\s*"?({EMAIL_REGEX})"?',
+        rf'"?([^"\s:=&,;?]+)"?\s*[:=]\s*"?({EMAIL_REGEX})"?',
         body,
         re.IGNORECASE
     )
@@ -685,12 +716,15 @@ def body_transformation(url, human, parsed_req, baseline, interact, email, proxy
 
             resp_lower = resp.text.lower()
             success_indicators = ["success", "email sent", "password reset", "reset link", "check your email", "token"]
-            for indicator in success_indicators:
-                # only if it's NEW vs baseline (baseline already says "check your email")
-                if (indicator in resp_lower and indicator not in _baseline_lower
-                        and resp.status_code in (200, 201, 202, 204)):
-                    _bt_positive.append(f"[+] new indicator '{indicator}' (absent from baseline) → {desc} | {body_short}")
-                    break
+            # A full re-rendered HTML page contains these words in its chrome; that's
+            # not a reset confirmation, so don't count it (kills the empty-redirect FP).
+            if not _looks_rendered_page(resp):
+                for indicator in success_indicators:
+                    # only if it's NEW vs baseline (baseline already says "check your email")
+                    if (indicator in resp_lower and indicator not in _baseline_lower
+                            and resp.status_code in (200, 201, 202, 204)):
+                        _bt_positive.append(f"[+] new indicator '{indicator}' (absent from baseline) → {desc} | {body_short}")
+                        break
 
         except requests.RequestException as e:
             print(f"  {Colors.RED}[!] request error ({desc}): {e}{Colors.RESET}")
@@ -776,12 +810,13 @@ def body_transformation(url, human, parsed_req, baseline, interact, email, proxy
                 print(f"{Colors.GREEN}   └── [+] {email} reflected in headers | PAYLOAD: {payload_tag}{Colors.RESET}")
 
             resp_lower = resp.text.lower()
-            for indicator in ["success", "email sent", "password reset", "reset link", "check your email", "token"]:
-                if (indicator in resp_lower and indicator not in _baseline_lower
-                        and resp.status_code in (200, 201, 202, 204)):
-                    print(f"{Colors.GREEN}   └── [+] new indicator '{indicator}' (absent from baseline) → {desc}{Colors.RESET}")
-                    print(f"{Colors.GREEN}       {qs_short}{Colors.RESET}")
-                    break
+            if not _looks_rendered_page(resp):
+                for indicator in ["success", "email sent", "password reset", "reset link", "check your email", "token"]:
+                    if (indicator in resp_lower and indicator not in _baseline_lower
+                            and resp.status_code in (200, 201, 202, 204)):
+                        print(f"{Colors.GREEN}   └── [+] new indicator '{indicator}' (absent from baseline) → {desc}{Colors.RESET}")
+                        print(f"{Colors.GREEN}       {qs_short}{Colors.RESET}")
+                        break
 
         except requests.RequestException as e:
             print(f"  {Colors.RED}[!] HPP request error ({desc}): {e}{Colors.RESET}")
@@ -869,6 +904,8 @@ def data_pollution(url, human, parsed_req, baseline, interact, email, proxy=None
 
         if re.search(EMAIL_REGEX, body, re.IGNORECASE):
             _dp_findings: dict = {}
+            _dp_err: dict = {}
+            _base_is_err = _looks_validation_error(baseline.get("body"))
             for ep in email_payloads:
                 live.testing(f"data-pollution {ep}")
                 human_time(human)
@@ -885,16 +922,23 @@ def data_pollution(url, human, parsed_req, baseline, interact, email, proxy=None
                     if abs(len(resp_bi.text) - baseline['body_length']) > 50 and resp_bi.status_code not in [400, 403]:
                         _tags.append(f"{baseline['body_length']}b > {len(resp_bi.text)}b")
                     if _tags:
-                        _dp_findings.setdefault(" | ".join(_tags), []).append(ep)
+                        tag = " | ".join(_tags)
+                        _dp_findings.setdefault(tag, []).append(ep)
+                        _dp_err.setdefault(tag, []).append(_looks_validation_error(resp_bi.text))
                 except requests.RequestException as e:
                     print(f"  {Colors.RED}[!] request error: {e}{Colors.RESET}")
             _DEDUP = 3
             for tag, _payloads in _dp_findings.items():
+                # If baseline was fine but EVERY divergent response is a validation
+                # error, the payloads were rejected (not accepted) → mark benign.
+                note = ""
+                if not _base_is_err and _dp_err.get(tag) and all(_dp_err[tag]):
+                    note = f" {Colors.CYAN}(validation error — inputs rejected, not accepted){Colors.RESET}"
                 if len(_payloads) >= _DEDUP:
-                    print(f"{Colors.YELLOW}   └── [{tag}] ×{len(_payloads)} | first: {_payloads[0]}{Colors.RESET}")
+                    print(f"{Colors.YELLOW}   └── [{tag}] ×{len(_payloads)} | first: {_payloads[0]}{note}{Colors.RESET}")
                 else:
                     for p in _payloads:
-                        print(f"{Colors.YELLOW}   └── [{tag}] | PAYLOAD: {p}{Colors.RESET}")
+                        print(f"{Colors.YELLOW}   └── [{tag}] | PAYLOAD: {p}{note}{Colors.RESET}")
             if not _dp_findings:
                 print(f"  {Colors.CYAN}[~] No anomalies — server returns consistent response for all payloads{Colors.RESET}")
     elif len(gepn) == 0:

@@ -3,6 +3,7 @@ import sys
 sys.dont_write_bytecode = True
 
 import json as _json
+import re
 import urllib.parse
 
 from utils.style import Colors
@@ -33,9 +34,26 @@ def _params(body, is_json):
         return {}
 
 
+_SEP_RE = re.compile(r'[_\-.\[\]]+')
+
+
+def _key_tokens(key):
+    """Split a form key into components so framework-prefixed names match.
+    e.g. 'dwfrm_newPasswords_newpassword' → {'dwfrm','newpasswords','newpassword'}."""
+    return {t for t in _SEP_RE.split(key.lower()) if t}
+
+
 def _present(params, names):
-    low = {k.lower(): k for k in params}
-    return [low[n.lower()] for n in names if n.lower() in low]
+    """Body keys matching any of `names`, by exact name OR as a delimited token —
+    so SFCC/Rails-style prefixed fields (dwfrm_newPasswords_newpassword,
+    user[email]) are recognised, without the false positives of raw substring match."""
+    names_l = {n.lower() for n in names}
+    out = []
+    for k in params:
+        kl = k.lower()
+        if kl in names_l or (_key_tokens(k) & names_l):
+            out.append(k)
+    return out
 
 
 def _rebuild(params, is_json):

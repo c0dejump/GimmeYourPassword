@@ -1,9 +1,25 @@
-POST /public-api/v1/user/password-reset/request/ HTTP/2
-Host: www.mpb.com
-Cookie: cf_clearance=u.x6MgMINeDhmb2WmJWPCrZM.EM7m7MFD4nJmTLHg34-1784735006-1.2.1.1-70WRT2lLXq.rn_Em8C3OKyZmYLV86s0R0A_8s0JnjQlqSHx2owBgK.WsvRUx8y5IBWfqzGzzTXgCdqmcYE22hli7d3wCvC1Woe9xxGyQXsZ1P_8gBLL40ZWh41wHM1Jv3AoDJxBxHEXsRxyEklzI.7F.gNFGq.eVEmZ0QGlbJ3PG0zLx0C4I_0LZhIEw94h2Ft7UKwGgpocofLH1ecfdOr2czMtDUyZ44_k4HIXdDI660az76lIhm1FlXdp3FWvEdUHRi_2mt2fMaEYO4cBWKlgvGq.tMiIZfj0QcF6vjO_V6IUoXaZCe5hebfM0nrjn.o88KzHC_.6H0CVdfo09BWmirZi48VJO4oLrJ9gTEPsmAt22poM4had204QvK7aNWOvF8AtZ1xC6ivWroux4NTGni3fF9DT40vGRO7UbGRv1Tq3zxL.H0vfwTKYopIPP56IKkI3F3ZM.8bcLaCxN6omYRHMefG7YPbxk._b2weALhwt.LMm9qxPHrJlRGQGbgUSyjUPM5sJQZi4hkyODFmFwEseNQ5aZ_5rw7Nh5YpnI7_aTr743T58mtsDsWothwxm37Yen7AgGh1pGT1Wfsg; token=eyJhbGciOiAiSFMyNTYiLCAiZHRmIjogIiVZLSVtLSVkVCVIOiVNOiVTLiVmJXoiLCAidHlwIjogIkpXVCIsICJ2ZXIiOiAxfQ%3D%3D.eyJleHAiOiAiMjAyNi0wNy0yM1QxNTo0MzozOS4wNTI0NDArMDAwMCIsICJncmFudF90eXBlIjogIkF1dGgiLCAiaWF0IjogIjIwMjYtMDctMjJUMTU6NDM6MzkuMDUyNDQwKzAwMDAiLCAibG9nZ2VkX2luIjogZmFsc2UsICJuYmYiOiAiMjAyNi0wNy0yMlQxNTo0MzozOS4wNTI0NDArMDAwMCIsICJ1aWQiOiAiODg0ZGNmMWUtOTM4My00OTUxLWE1YTYtNDk4MGU5YTZlZGNhIiwgInVzZXJfaWQiOiBudWxsfQ%3D%3D.f92839ed142d4486e86f4f903071b6f11d39f5fee1198e185a96be40256609cd;
-Content-Length: 59
-Accept: application/json, text/plain, */*
-Content-Type: application/x-www-form-urlencoded
-User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36
+POST /auth/password/reset HTTP/2
+Host: auth.example.com
+Cookie: session_id=00000000-0000-0000-0000-000000000000; app_token=00000000-0000-0000-0000-000000000000
+Content-Length: 30
+Sec-Ch-Ua-Platform: "Windows"
+Authorization: Bearer 00000000-0000-0000-0000-000000000000
+X-Correlation-Id: 00000000-0000-0000-0000-000000000000
+Sec-Ch-Ua: "Not=A?Brand";v="99", "Google Chrome";v="151", "Chromium";v="151"
+Sec-Ch-Ua-Mobile: ?0
+Content-Type: application/json
+X-Locale: en_US
+X-Client: SPA|1.0.0
+X-Visitor-Id: 00000000-0000-0000-0000-000000000000
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36
+Dnt: 1
+Accept: */*
+Origin: https://www.example.com
+Sec-Fetch-Site: same-site
+Sec-Fetch-Mode: cors
+Sec-Fetch-Dest: empty
+Referer: https://www.example.com/
+Accept-Encoding: gzip, deflate, br
+Priority: u=1, i
 
-email=attacker%40your-domain
+{"email":"victim@example.com"}

@@ -540,23 +540,113 @@ def _compare_tokens(tokens, timestamps=None):
 
 # ─── Main entry point ─────────────────────────────────────────────────────────
 
-def _tokens_from_reset_input(raw):
-    """Pull candidate tokens out of a reset URL or a bare token pasted from an email."""
-    found = []
-    for m in JWT_RE.finditer(raw):
+# Reset-secret param names to pull out of a URL query (incl. the short-code keys —
+# a 6-digit `verification_code` is the actual secret on some flows, not the wrapper).
+_RESET_URL_KEYS = ("token", "code", "t", "key", "reset_token", "resetToken",
+                   "auth", "oobCode", "otp", "verify", "confirmation", "hash",
+                   "verification_code", "verificationCode", "pin",
+                   "resetCode", "reset_code", "passwordToken")
+
+def _b64_maybe_decode(val):
+    """If `val` is base64 that decodes to printable text carrying a URL/query, return
+    that text; else None. This is what unwraps a tracker's opaque param."""
+    s = (val or "").strip()
+    if len(s) < 12 or not re.fullmatch(r'[A-Za-z0-9_\-+/=]+', s):
+        return None
+    for dec in (base64.urlsafe_b64decode, base64.b64decode):
+        try:
+            txt = dec(s + "=" * (-len(s) % 4)).decode("utf-8")
+        except Exception:
+            continue
+        low = txt.lower()
+        if any(k in low for k in ("http", "%3d", "=", "verification", "token", "code", "email")):
+            return txt
+    return None
+
+
+def _unwrap_tracker(raw):
+    """
+    Email click-trackers wrap the REAL reset URL inside a base64 blob. It may sit in a
+    query param (Salesforce Marketing Cloud `?qs=`, Oracle Responsys `?e=`) OR in a
+    PATH segment (Mailjet `…/lnk/<meta>/1/<sig>/<b64url>`, SendGrid, Mailchimp). The
+    wrapper is long+opaque, so naive entropy analysis calls it "secure" and misses the
+    genuine (possibly weak) secret inside. We run every query value AND every path
+    segment through a strict base64→printable-URL filter, so only a segment that really
+    decodes to a URL/query is unwrapped (binary tracking blobs are rejected). Returns
+    the decoded inner string(s), recursively URL-decoded.
+    """
+    out, seen = [], set()
+
+    def _embedded(val):
+        """Return the inner target if `val` carries one: base64-encoded (Responsys/
+        SFMC/Mailjet) OR URL-encoded (AWS SES /L0/https%3A%2F%2F…, Adobe)."""
+        dec = _b64_maybe_decode(val)
+        if dec:
+            return dec
+        # URL-encoded embedded absolute URL: `https:%2F%2F…` / `https%3A%2F%2F…`
+        cur = val
+        for _ in range(2):
+            nxt = urllib.parse.unquote(cur)
+            if nxt == cur:
+                break
+            cur = nxt
+        if re.match(r'https?://', cur):
+            return cur
+        return None
+
+    def _try(val):
+        dec = _embedded(val)
+        if not dec:
+            return
+        cur, peeled = dec, set()
+        for _ in range(4):  # peel repeated URL-encoding
+            if cur in peeled:
+                break
+            peeled.add(cur)
+            cur = urllib.parse.unquote(cur)
+        if cur not in seen:
+            seen.add(cur)
+            out.append(cur)
+
+    try:
+        parts = urllib.parse.urlparse(raw)
+    except Exception:
+        return out
+    try:
+        for vals in urllib.parse.parse_qs(parts.query, keep_blank_values=True).values():
+            for v in vals:
+                _try(v)
+    except Exception:
+        pass
+    for seg in parts.path.split("/"):
+        _try(seg)
+    return out
+
+
+def _extract_url_tokens(text, found):
+    """Pull JWTs and known reset-secret params out of one URL/query string."""
+    for m in JWT_RE.finditer(text):
         if m.group(1) not in found:
             found.append(m.group(1))
-    if "://" in raw or "?" in raw:
-        try:
-            q = urllib.parse.urlparse(raw).query or raw.split("?", 1)[-1]
-            params = urllib.parse.parse_qs(q)
-            for key in ("token", "code", "t", "key", "reset_token", "resetToken",
-                        "auth", "oobCode", "otp", "verify", "confirmation", "hash"):
-                for val in params.get(key, []):
-                    if val and val not in found:
-                        found.append(val)
-        except Exception:
-            pass
+    if not ("=" in text or "?" in text or "://" in text):
+        return
+    query = text.split("?", 1)[-1] if "?" in text else text
+    try:
+        params = urllib.parse.parse_qs(query, keep_blank_values=True)
+    except Exception:
+        return
+    for key in _RESET_URL_KEYS:
+        for val in params.get(key, []):
+            if val and val not in found:
+                found.append(val)
+
+
+def _tokens_from_reset_input(raw):
+    """Pull candidate tokens out of a reset URL or a bare token pasted from an email.
+    Transparently unwraps email click-tracker redirects first (see _unwrap_tracker)."""
+    found = []
+    for text in [raw] + _unwrap_tracker(raw):
+        _extract_url_tokens(text, found)
     if not found:
         cand = raw.strip()
         if len(cand) >= 8 and " " not in cand:
@@ -575,6 +665,15 @@ def analyze_reset_material(raw, victim_email=None):
     if not raw:
         print(f"{Colors.YELLOW}   └── [!] empty value{Colors.RESET}")
         return
+    # If this is a click-tracker wrapper, show the decoded real reset URL — otherwise
+    # the user sees only the opaque 400-char wrapper and never the true secret inside.
+    unwrapped = _unwrap_tracker(raw)
+    for inner in unwrapped:
+        # Full URL, untruncated: the decoded target is the whole point — it carries the
+        # real reset params (verification_code, email…) the analyst needs to see.
+        print(f"{Colors.YELLOW}   └── [i] click-tracker wrapper decoded → real reset URL:{Colors.RESET}")
+        print(f"{Colors.YELLOW}       {inner}{Colors.RESET}")
+
     tokens = _tokens_from_reset_input(raw)
     if not tokens:
         print(f"{Colors.YELLOW}   └── [!] no token found in the provided value{Colors.RESET}")

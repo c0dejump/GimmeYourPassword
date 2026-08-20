@@ -16,6 +16,48 @@ CSRF_REQUEST_HEADERS = [
     "X-CSRF-Token", "X-XSRF-TOKEN", "X-CSRFToken",
 ]
 
+# Content-Type values that do NOT trigger a CORS preflight (a "simple request").
+CORS_SIMPLE_CONTENT_TYPES = (
+    "application/x-www-form-urlencoded",
+    "multipart/form-data",
+    "text/plain",
+)
+
+# Request headers a browser sets by itself or that are CORS-safelisted: a cross-site
+# page can rely on these WITHOUT a preflight. Anything else (Authorization, X-*, any
+# custom header) is "author-set" and forces a preflight — which the attacker's origin
+# must be explicitly allowed to pass. `Sec-*` are browser-forbidden headers, so they
+# never come from attacker JS either.
+BROWSER_MANAGED_HEADERS = {
+    "host", "user-agent", "accept", "accept-language", "accept-encoding",
+    "content-language", "content-length", "connection", "referer", "origin",
+    "cookie", "dnt", "priority", "cache-control", "pragma",
+    "upgrade-insecure-requests", "te", "range",
+}
+
+
+def _forces_preflight(headers):
+    """
+    Return (bool, reason): whether a browser sending this request cross-origin would
+    first have to pass a CORS preflight (OPTIONS). That happens when the Content-Type
+    isn't a simple one, or any author-set (non-safelisted) header is present.
+
+    Why it matters for CSRF: if a preflight is forced and the server doesn't allow the
+    attacker's Origin, the real cross-site request is NEVER sent by the browser — so a
+    same-server 200 (which we get from Python, bypassing the browser) is not evidence
+    of a cross-site-forgeable request.
+    """
+    for k, v in headers.items():
+        kl = k.lower()
+        if kl == "content-type":
+            if not any(ct in v.lower() for ct in CORS_SIMPLE_CONTENT_TYPES):
+                return True, f"Content-Type: {v.split(';')[0].strip()} (non-simple)"
+        elif kl.startswith("sec-"):
+            continue
+        elif kl not in BROWSER_MANAGED_HEADERS:
+            return True, f"author-set header '{k}'"
+    return False, None
+
 
 def _has_csrf_protection(headers, body):
     """Return (csrf_header_key or None, csrf_body_token or None)."""
@@ -72,11 +114,11 @@ def _cors_analysis(method, uri, headers, body, proxies):
         acao, acac = _probe_cors(method, uri, headers, body, test_origin, proxies)
     except requests.RequestException as e:
         print(f"  {Colors.RED}[!] {e}{Colors.RESET}")
-        return
+        return False
 
     if acao is None:
         print(f"{Colors.GREEN}   └── [OK] No Access-Control-Allow-Origin returned for a foreign origin{Colors.RESET}")
-        return
+        return False
 
     # Arbitrary-origin reflection. NOTE on severity: reflect+credentials is only
     # *impactful* when the response carries victim-specific / session data that an
@@ -106,6 +148,10 @@ def _cors_analysis(method, uri, headers, body, proxies):
                   f"(sandboxed-iframe reachable){Colors.RESET}")
     except requests.RequestException:
         pass
+
+    # Whether the attacker Origin is explicitly allowed — needed to know if a
+    # preflight-forcing request could actually be delivered cross-site.
+    return acao == test_origin
 
 
 def csrf(url, parsed_req, baseline, interact, email, proxy=None):
@@ -143,17 +189,34 @@ def csrf(url, parsed_req, baseline, interact, email, proxy=None):
         print(f"{Colors.CYAN}   └── [INFO] No CSRF token found in request{Colors.RESET}")
 
     # --- CORS policy (independent of cookies: usually a gateway-wide config) ---
-    _cors_analysis(method, uri, headers, body, proxies)
+    cors_reflects = _cors_analysis(method, uri, headers, body, proxies)
 
-    # CSRF only makes sense when the browser auto-attaches ambient credentials,
-    # i.e. a session cookie. A public / bearer-token endpoint (no Cookie) is not
-    # CSRF-exploitable, so confirming "cross-origin accepted" there is a false
-    # positive — skip the confirmation phases.
+    # CSRF only makes sense when the BROWSER auto-attaches the credential the endpoint
+    # relies on. Two things break that, and each makes "cross-origin accepted" (which
+    # we observe server-to-server, bypassing the browser) a false positive:
+    #
+    #  1. Authorization header — never ambient. The attacker's page cannot set it on a
+    #     cross-site request without a preflight the server won't pass, so THIS request
+    #     is not browser-forgeable even if a cookie is also present.
+    #  2. A request that forces a CORS preflight (non-simple Content-Type or any
+    #     author-set header) while the server does NOT allow the attacker Origin: the
+    #     browser blocks it at the preflight and never sends the real request.
     has_cookie = any(k.lower() == "cookie" for k in headers)
     has_bearer = any(k.lower() == "authorization" for k in headers)
+
+    if has_bearer:
+        print(f"{Colors.GREEN}   └── [OK] request authenticated via Authorization header (not ambient) — "
+              f"a cross-site page cannot replay it; CSRF N/A, cross-origin test skipped{Colors.RESET}")
+        return
     if not has_cookie:
-        reason = "bearer/Authorization auth" if has_bearer else "no session cookie → public/unauthenticated endpoint"
-        print(f"{Colors.CYAN}   └── [i] {reason} — CSRF not applicable, cross-origin test skipped{Colors.RESET}")
+        print(f"{Colors.CYAN}   └── [i] no session cookie → public/unauthenticated endpoint — "
+              f"CSRF not applicable, cross-origin test skipped{Colors.RESET}")
+        return
+
+    preflight, why = _forces_preflight(headers)
+    if preflight and not cors_reflects:
+        print(f"{Colors.GREEN}   └── [OK] request forces a CORS preflight ({why}) the server won't pass "
+              f"for a foreign origin → not browser-forgeable cross-site; CSRF N/A{Colors.RESET}")
         return
 
     # --- Phase 2: Cross-origin simulation ---
@@ -177,7 +240,12 @@ def csrf(url, parsed_req, baseline, interact, email, proxy=None):
         rl = len(resp.text)
         ratio = abs(rl - bl) / bl if bl > 0 else 0.0
 
-        if resp.status_code == baseline["status"] and ratio < 0.15:
+        # If the baseline is itself an error/throttle (4xx/5xx), "matches baseline"
+        # means BOTH were rejected — not that the cross-origin request was accepted.
+        if baseline["status"] and baseline["status"] >= 400:
+            print(f"{Colors.CYAN}   └── [i] baseline is {baseline['status']} (endpoint rejecting/throttling) — "
+                  f"cross-origin result inconclusive; re-run against a clean 2xx baseline{Colors.RESET}")
+        elif resp.status_code == baseline["status"] and ratio < 0.15:
             # A reset-*request* endpoint only mails a link the victim can already
             # request themselves → no state change, negligible impact. Informational,
             # most BB programs won't accept it. No PoC emitted.

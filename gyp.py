@@ -3,14 +3,10 @@
 import sys
 sys.dont_write_bytecode = True
 
-from datetime import datetime
-import time
-
 # utils
 from cli import args
 from utils.style import Colors
 from utils.utils import (
-    requests,
     parse_headers,
     urllib3,
     re,
@@ -21,6 +17,8 @@ from utils.utils import (
     classify_reset_flow,
     baseline_looks_error,
     detect_bearer_expiry,
+    detect_waf,
+    waf_blocked,
 )
 from utils.requests_settings import send_baseline
 from utils import live
@@ -131,13 +129,14 @@ def cli_main() -> None:
     user_agent = parser.user_agent
     humans = parser.humans
     proxy_arg = parser.proxy
-    burp_arg = parser.burp
+    # requests needs a scheme on the proxy URL: normalise "127.0.0.1:8080" → "http://…"
+    if proxy_arg and "://" not in proxy_arg:
+        proxy_arg = "http://" + proxy_arg
     mail_wait = parser.mail_wait
     disposable_mail = parser.disposable_mail
     reset_url = parser.reset_url
 
     human = humans
-    start_time_report = time.time()
 
     live.enable()
 
@@ -160,6 +159,13 @@ def cli_main() -> None:
 
             print(f"\n{Colors.CYAN}[*] Parsing: {rawrequest}{Colors.RESET}")
             parsed_req = parse_raw_request(rawrequest)
+
+            # -u is optional: the real host/path always come from the raw request.
+            # `url` is used only to pick the scheme, so synthesise it from the request's
+            # Host (default https) when -u is omitted. An explicit -u still overrides
+            # (e.g. -u http://host to force plain HTTP).
+            if not url:
+                url = f"https://{parsed_req['host']}"
 
             # Apply CLI overrides after parsing
             if custom_header:
@@ -195,6 +201,18 @@ def cli_main() -> None:
                 else:
                     print(f"{Colors.YELLOW}[!] Authorization Bearer token expires in ~{_bexp[1]}s: "
                           f"it will likely die mid-scan and invalidate later findings.{Colors.RESET}")
+
+            _waf = detect_waf(baseline)
+            if _waf:
+                if waf_blocked(baseline):
+                    print(f"{Colors.RED}[!] {_waf} is CHALLENGING/BLOCKING the baseline itself: the origin was "
+                          f"never reached — status/length findings below are the WAF, not the app.{Colors.RESET}")
+                    print(f"{Colors.RED}    → Replay with a valid {_waf} cookie + real browser UA (or route via --proxy Burp), "
+                          f"or the whole run is noise.{Colors.RESET}")
+                else:
+                    print(f"{Colors.YELLOW}[!] {_waf} anti-bot detected in front of the origin (baseline passed). "
+                          f"Mutation/no-JS traffic may get challenged mid-scan → intermittent 403/404 that are WAF "
+                          f"artifacts, not app behavior. Prefer --proxy through a warmed browser session.{Colors.RESET}")
 
             markers = detect_anti_automation(parsed_req)
             if markers:

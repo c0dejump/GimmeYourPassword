@@ -99,6 +99,75 @@ def detect_anti_automation(parsed_req) -> list[str]:
     return [m for m in ANTI_AUTOMATION_MARKERS if m in hay]
 
 
+## Anti-bot / WAF interception awareness ##
+
+# When a CDN anti-bot (DataDome, Cloudflare challenge, PerimeterX/HUMAN, Akamai,
+# Imperva…) answers INSTEAD of the origin, every status/length "finding" reflects
+# the WAF, not the app. Two distinct facts matter:
+#   • PRESENT  — an anti-bot sits in front (seen even on legit 200s). Automated,
+#     no-JS mutation traffic is at risk of being challenged mid-scan.
+#   • BLOCKED  — THIS response is a challenge/deny page (the request never reached
+#     the app), so its status/body must not be treated as an application result.
+
+# header-key (lower) → product, proving an anti-bot is in the path
+WAF_PRESENT_HEADERS = {
+    "x-datadome": "DataDome",
+    "x-datadome-cid": "DataDome",
+    "cf-ray": "Cloudflare",
+    "cf-mitigated": "Cloudflare",
+    "x-px": "PerimeterX/HUMAN",
+    "x-iinfo": "Imperva/Incapsula",
+    "x-cdn": "Imperva/Incapsula",
+    "akamai-grn": "Akamai",
+}
+
+# signals that THIS specific response is a challenge/deny page, not the origin's
+WAF_BLOCK_HEADERS = ("x-datadome-cid", "cf-mitigated")
+WAF_BLOCK_BODY_MARKERS = (
+    "datadome", "px-captcha", "_px", "please enable js", "enable javascript",
+    "captcha-delivery.com", "geo.captcha", "attention required", "cf-error-details",
+    "_incapsula_", "incident id", "unusual traffic", "verify you are a human",
+)
+
+
+def detect_waf(resp) -> str | None:
+    """Return the anti-bot product name if one is present in the response, else None."""
+    if not resp:
+        return None
+    headers = resp.get("headers", {}) or {}
+    lower = {k.lower(): (v or "") for k, v in headers.items()}
+    for hk, product in WAF_PRESENT_HEADERS.items():
+        if hk in lower:
+            return product
+    server = lower.get("server", "").lower()
+    for token, product in (("datadome", "DataDome"), ("cloudflare", "Cloudflare"),
+                           ("incapsula", "Imperva/Incapsula")):
+        if token in server:
+            return product
+    if "datadome=" in lower.get("set-cookie", "").lower():
+        return "DataDome"
+    return None
+
+
+def waf_blocked(resp) -> bool:
+    """True if THIS response looks like an anti-bot challenge/deny page (request
+    never reached the origin), so its status/body is not an application result."""
+    if not resp:
+        return False
+    headers = resp.get("headers", {}) or {}
+    lower = {k.lower() for k in headers}
+    if any(h in lower for h in WAF_BLOCK_HEADERS):
+        # cid is emitted on challenge/deny responses; a plain 2xx passthrough omits it
+        if resp.get("status") in (401, 403, 429) or "x-datadome-cid" in lower:
+            if resp.get("status") not in (200, 201, 202, 204):
+                return True
+    body = (resp.get("body") or "").lower()
+    if resp.get("status") in (401, 403, 429, 503):
+        if any(m in body for m in WAF_BLOCK_BODY_MARKERS):
+            return True
+    return False
+
+
 ## Auth / baseline-validity awareness ##
 
 # If the baseline itself is an auth error, EVERY subsequent finding is meaningless
